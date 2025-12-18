@@ -1,10 +1,14 @@
 package rig
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
@@ -15,6 +19,25 @@ var (
 	ErrRigNotFound = errors.New("rig not found")
 	ErrRigExists   = errors.New("rig already exists")
 )
+
+// RigConfig represents the rig-level configuration (config.json at rig root).
+type RigConfig struct {
+	Type      string       `json:"type"`       // "rig"
+	Version   int          `json:"version"`    // schema version
+	Name      string       `json:"name"`       // rig name
+	GitURL    string       `json:"git_url"`    // repository URL
+	CreatedAt time.Time    `json:"created_at"` // when rig was created
+	Beads     *BeadsConfig `json:"beads,omitempty"`
+}
+
+// BeadsConfig represents beads configuration for the rig.
+type BeadsConfig struct {
+	Prefix     string `json:"prefix"`                // issue prefix (e.g., "gt")
+	SyncRemote string `json:"sync_remote,omitempty"` // git remote for bd sync
+}
+
+// CurrentRigConfigVersion is the current schema version.
+const CurrentRigConfigVersion = 1
 
 // Manager handles rig discovery, loading, and creation.
 type Manager struct {
@@ -125,42 +148,222 @@ func (m *Manager) loadRig(name string, entry config.RigEntry) (*Rig, error) {
 	return rig, nil
 }
 
-// AddRig clones a repository and registers it as a rig.
-func (m *Manager) AddRig(name, gitURL string) (*Rig, error) {
-	if m.RigExists(name) {
+// AddRigOptions configures rig creation.
+type AddRigOptions struct {
+	Name        string // Rig name (directory name)
+	GitURL      string // Repository URL
+	BeadsPrefix string // Beads issue prefix (defaults to derived from name)
+	CrewName    string // Default crew workspace name (defaults to "main")
+}
+
+// AddRig creates a new rig as a container with clones for each agent.
+// The rig structure is:
+//
+//	<name>/                    # Container (NOT a git clone)
+//	├── config.json            # Rig configuration
+//	├── .beads/                # Rig-level issue tracking
+//	├── refinery/rig/          # Canonical main clone
+//	├── mayor/rig/             # Mayor's working clone
+//	├── witness/               # Witness agent (no clone)
+//	├── polecats/              # Worker directories (empty)
+//	└── crew/<crew>/           # Default human workspace
+func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
+	if m.RigExists(opts.Name) {
 		return nil, ErrRigExists
 	}
 
-	rigPath := filepath.Join(m.townRoot, name)
+	rigPath := filepath.Join(m.townRoot, opts.Name)
 
 	// Check if directory already exists
 	if _, err := os.Stat(rigPath); err == nil {
 		return nil, fmt.Errorf("directory already exists: %s", rigPath)
 	}
 
-	// Clone repository
-	if err := m.git.Clone(gitURL, rigPath); err != nil {
-		return nil, fmt.Errorf("cloning repository: %w", err)
+	// Derive defaults
+	if opts.BeadsPrefix == "" {
+		opts.BeadsPrefix = deriveBeadsPrefix(opts.Name)
+	}
+	if opts.CrewName == "" {
+		opts.CrewName = "main"
 	}
 
-	// Create agent directories
-	if err := m.createAgentDirs(rigPath); err != nil {
-		// Cleanup on failure
-		os.RemoveAll(rigPath)
-		return nil, fmt.Errorf("creating agent directories: %w", err)
+	// Create container directory
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		return nil, fmt.Errorf("creating rig directory: %w", err)
 	}
 
-	// Update git exclude
-	if err := m.updateGitExclude(rigPath); err != nil {
-		// Non-fatal, continue
+	// Track cleanup on failure
+	cleanup := func() { os.RemoveAll(rigPath) }
+	success := false
+	defer func() {
+		if !success {
+			cleanup()
+		}
+	}()
+
+	// Create rig config
+	rigConfig := &RigConfig{
+		Type:      "rig",
+		Version:   CurrentRigConfigVersion,
+		Name:      opts.Name,
+		GitURL:    opts.GitURL,
+		CreatedAt: time.Now(),
+		Beads: &BeadsConfig{
+			Prefix: opts.BeadsPrefix,
+		},
+	}
+	if err := m.saveRigConfig(rigPath, rigConfig); err != nil {
+		return nil, fmt.Errorf("saving rig config: %w", err)
 	}
 
-	// Register in config
-	m.config.Rigs[name] = config.RigEntry{
-		GitURL: gitURL,
+	// Clone repository for refinery (canonical main)
+	refineryRigPath := filepath.Join(rigPath, "refinery", "rig")
+	if err := os.MkdirAll(filepath.Dir(refineryRigPath), 0755); err != nil {
+		return nil, fmt.Errorf("creating refinery dir: %w", err)
+	}
+	if err := m.git.Clone(opts.GitURL, refineryRigPath); err != nil {
+		return nil, fmt.Errorf("cloning for refinery: %w", err)
 	}
 
-	return m.loadRig(name, m.config.Rigs[name])
+	// Clone repository for mayor
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		return nil, fmt.Errorf("creating mayor dir: %w", err)
+	}
+	if err := m.git.Clone(opts.GitURL, mayorRigPath); err != nil {
+		return nil, fmt.Errorf("cloning for mayor: %w", err)
+	}
+
+	// Clone repository for default crew workspace
+	crewPath := filepath.Join(rigPath, "crew", opts.CrewName)
+	if err := os.MkdirAll(filepath.Dir(crewPath), 0755); err != nil {
+		return nil, fmt.Errorf("creating crew dir: %w", err)
+	}
+	if err := m.git.Clone(opts.GitURL, crewPath); err != nil {
+		return nil, fmt.Errorf("cloning for crew: %w", err)
+	}
+
+	// Create witness directory (no clone needed)
+	witnessPath := filepath.Join(rigPath, "witness")
+	if err := os.MkdirAll(witnessPath, 0755); err != nil {
+		return nil, fmt.Errorf("creating witness dir: %w", err)
+	}
+
+	// Create polecats directory (empty)
+	polecatsPath := filepath.Join(rigPath, "polecats")
+	if err := os.MkdirAll(polecatsPath, 0755); err != nil {
+		return nil, fmt.Errorf("creating polecats dir: %w", err)
+	}
+
+	// Initialize agent state files
+	if err := m.initAgentStates(rigPath); err != nil {
+		return nil, fmt.Errorf("initializing agent states: %w", err)
+	}
+
+	// Initialize beads at rig level
+	if err := m.initBeads(rigPath, opts.BeadsPrefix); err != nil {
+		return nil, fmt.Errorf("initializing beads: %w", err)
+	}
+
+	// Register in town config
+	m.config.Rigs[opts.Name] = config.RigEntry{
+		GitURL:  opts.GitURL,
+		AddedAt: time.Now(),
+		BeadsConfig: &config.BeadsConfig{
+			Prefix: opts.BeadsPrefix,
+		},
+	}
+
+	success = true
+	return m.loadRig(opts.Name, m.config.Rigs[opts.Name])
+}
+
+// saveRigConfig writes the rig configuration to config.json.
+func (m *Manager) saveRigConfig(rigPath string, cfg *RigConfig) error {
+	configPath := filepath.Join(rigPath, "config.json")
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0644)
+}
+
+// initAgentStates creates initial state.json files for agents.
+func (m *Manager) initAgentStates(rigPath string) error {
+	agents := []struct {
+		path string
+		role string
+	}{
+		{filepath.Join(rigPath, "refinery", "state.json"), "refinery"},
+		{filepath.Join(rigPath, "witness", "state.json"), "witness"},
+		{filepath.Join(rigPath, "mayor", "state.json"), "mayor"},
+	}
+
+	for _, agent := range agents {
+		state := &config.AgentState{
+			Role:       agent.role,
+			LastActive: time.Now(),
+		}
+		data, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(agent.path, data, 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// initBeads initializes the beads database at rig level.
+func (m *Manager) initBeads(rigPath, prefix string) error {
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		return err
+	}
+
+	// Run bd init if available, with --no-agents to skip AGENTS.md creation
+	cmd := exec.Command("bd", "init", "--prefix", prefix, "--no-agents")
+	cmd.Dir = rigPath
+	if err := cmd.Run(); err != nil {
+		// bd might not be installed or --no-agents not supported, create minimal structure
+		configPath := filepath.Join(beadsDir, "config.yaml")
+		configContent := fmt.Sprintf("prefix: %s\n", prefix)
+		if writeErr := os.WriteFile(configPath, []byte(configContent), 0644); writeErr != nil {
+			return writeErr
+		}
+	}
+	return nil
+}
+
+// deriveBeadsPrefix generates a beads prefix from a rig name.
+// Examples: "gastown" -> "gt", "my-project" -> "mp", "foo" -> "foo"
+func deriveBeadsPrefix(name string) string {
+	// Remove common suffixes
+	name = strings.TrimSuffix(name, "-py")
+	name = strings.TrimSuffix(name, "-go")
+
+	// Split on hyphens/underscores
+	parts := strings.FieldsFunc(name, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+
+	if len(parts) >= 2 {
+		// Take first letter of each part: "gas-town" -> "gt"
+		prefix := ""
+		for _, p := range parts {
+			if len(p) > 0 {
+				prefix += string(p[0])
+			}
+		}
+		return strings.ToLower(prefix)
+	}
+
+	// Single word: use first 2-3 chars
+	if len(name) <= 3 {
+		return strings.ToLower(name)
+	}
+	return strings.ToLower(name[:2])
 }
 
 // RemoveRig unregisters a rig (does not delete files).
@@ -171,37 +374,6 @@ func (m *Manager) RemoveRig(name string) error {
 
 	delete(m.config.Rigs, name)
 	return nil
-}
-
-// createAgentDirs creates the standard agent directory structure.
-func (m *Manager) createAgentDirs(rigPath string) error {
-	for _, dir := range AgentDirs {
-		dirPath := filepath.Join(rigPath, dir)
-		if err := os.MkdirAll(dirPath, 0755); err != nil {
-			return fmt.Errorf("creating %s: %w", dir, err)
-		}
-	}
-	return nil
-}
-
-// updateGitExclude adds agent directories to .git/info/exclude.
-func (m *Manager) updateGitExclude(rigPath string) error {
-	excludePath := filepath.Join(rigPath, ".git", "info", "exclude")
-
-	// Read existing content
-	content, err := os.ReadFile(excludePath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	// Append agent dirs
-	additions := "\n# Gas Town agent directories\n"
-	for _, dir := range AgentDirs {
-		additions += dir + "/\n"
-	}
-
-	// Write back
-	return os.WriteFile(excludePath, append(content, []byte(additions)...), 0644)
 }
 
 // ListRigNames returns the names of all registered rigs.

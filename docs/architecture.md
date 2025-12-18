@@ -151,52 +151,49 @@ sync-branch: beads-sync    # Separate branch for beads commits
 ### Town Level
 
 ```
-~/ai/                              # Town root
-├── config/                        # Town configuration (VISIBLE, not hidden)
-│   ├── town.json                  # {"type": "town", "name": "..."}
-│   ├── rigs.json                  # Registry of managed rigs
-│   └── federation.json            # Remote machine config (future)
+~/gt/                              # Town root (Gas Town harness)
+├── CLAUDE.md                      # Mayor role prompting (at town root)
+├── .beads/                        # Town-level beads (optional)
 │
 ├── mayor/                         # Mayor's HOME at town level
-│   ├── CLAUDE.md                  # Mayor role prompting
+│   ├── town.json                  # {"type": "town", "name": "..."}
+│   ├── rigs.json                  # Registry of managed rigs
 │   ├── mail/inbox.jsonl           # Mayor's inbox
 │   └── state.json                 # Mayor state
 │
-├── wyvern/                        # A rig (project repository)
-└── beads/                         # Another rig
+├── rigs/                          # Empty by default, for future use
+│
+├── gastown/                       # A rig (project container)
+└── wyvern/                        # Another rig
 ```
 
 ### Rig Level
 
+Created by `gt rig add <name> <git-url>`:
+
 ```
-wyvern/                            # Rig = container (NOT a git clone)
-├── config.json                    # Rig configuration
+gastown/                           # Rig = container (NOT a git clone)
+├── config.json                    # Rig configuration (git_url, beads prefix)
 ├── .beads/                        # Rig-level issue tracking
-│   ├── beads.db                   # SQLite database
-│   └── issues.jsonl               # Git-synced issues
-│
-├── polecats/                      # Worker directories
-│   ├── Nux/                       # Full git clone (BEADS_DIR=../.beads)
-│   ├── Toast/                     # Full git clone (BEADS_DIR=../.beads)
-│   └── Capable/                   # Full git clone (BEADS_DIR=../.beads)
+│   └── config.yaml                # Beads config (prefix, sync settings)
 │
 ├── refinery/                      # Refinery agent
 │   ├── rig/                       # Authoritative "main" clone
-│   ├── state.json
-│   └── mail/inbox.jsonl
+│   └── state.json
+│
+├── mayor/                         # Mayor's presence in this rig
+│   ├── rig/                       # Mayor's rig-specific clone
+│   └── state.json
 │
 ├── witness/                       # Witness agent (per-rig pit boss)
-│   ├── state.json                 # May not need its own clone
-│   └── mail/inbox.jsonl
+│   └── state.json                 # No clone needed (monitors polecats)
 │
 ├── crew/                          # Overseer's personal workspaces
-│   ├── dave/                      # Full git clone (user-managed)
-│   ├── emma/                      # Full git clone (user-managed)
-│   └── fred/                      # Full git clone (user-managed)
+│   └── main/                      # Default workspace (full git clone)
 │
-└── mayor/                         # Mayor's presence in this rig
-    ├── rig/                       # Mayor's rig-specific clone
-    └── state.json
+└── polecats/                      # Worker directories (initially empty)
+    ├── Nux/                       # Full git clone (created by gt spawn)
+    └── Toast/                     # Full git clone (created by gt spawn)
 ```
 
 **Key points:**
@@ -207,34 +204,39 @@ wyvern/                            # Rig = container (NOT a git clone)
 
 ```mermaid
 graph TB
-    subgraph Rig["Rig: wyvern (container, NOT a git clone)"]
+    subgraph Rig["Rig: gastown (container, NOT a git clone)"]
         Config["config.json"]
         Beads[".beads/"]
 
         subgraph Polecats["polecats/"]
             Nux["Nux/<br/>(git clone)"]
             Toast["Toast/<br/>(git clone)"]
-            Capable["Capable/<br/>(git clone)"]
         end
 
         subgraph Refinery["refinery/"]
             RefRig["rig/<br/>(canonical main)"]
-            RefMail["mail/inbox.jsonl"]
+            RefState["state.json"]
         end
 
         subgraph Witness["witness/"]
-            WitMail["mail/inbox.jsonl"]
             WitState["state.json"]
         end
 
         subgraph MayorRig["mayor/"]
             MayRig["rig/<br/>(git clone)"]
+            MayState["state.json"]
+        end
+
+        subgraph Crew["crew/"]
+            CrewMain["main/<br/>(git clone)"]
         end
     end
 
     Beads -.->|BEADS_DIR| Nux
     Beads -.->|BEADS_DIR| Toast
-    Beads -.->|BEADS_DIR| Capable
+    Beads -.->|BEADS_DIR| RefRig
+    Beads -.->|BEADS_DIR| MayRig
+    Beads -.->|BEADS_DIR| CrewMain
 ```
 
 ### ASCII Directory Layout
@@ -242,48 +244,26 @@ graph TB
 For reference without mermaid rendering:
 
 ```
-~/ai/                                    # TOWN ROOT
-├── config/                              # Town configuration (visible)
-│   ├── town.json                        # {"type": "town", "name": "..."}
-│   ├── rigs.json                        # Registry of managed rigs
-│   └── federation.json                  # Remote machine config (future)
+~/gt/                                    # TOWN ROOT (Gas Town harness)
+├── CLAUDE.md                            # Mayor role prompting
+├── .beads/                              # Town-level beads (optional)
 │
 ├── mayor/                               # Mayor's home (at town level)
-│   ├── CLAUDE.md                        # Mayor role prompting
+│   ├── town.json                        # {"type": "town", "name": "..."}
+│   ├── rigs.json                        # Registry of managed rigs
 │   ├── mail/inbox.jsonl                 # Mayor's inbox
 │   └── state.json                       # Mayor state
 │
-├── wyvern/                              # RIG (container, NOT a git clone)
+├── gastown/                             # RIG (container, NOT a git clone)
 │   ├── config.json                      # Rig configuration
 │   ├── .beads/                          # Rig-level issue tracking
-│   │   ├── beads.db                     # SQLite (gitignored)
-│   │   ├── issues.jsonl                 # Git-tracked issues
-│   │   └── config.yaml                  # Beads config (sync-branch, etc.)
-│   │
-│   ├── polecats/                        # Worker directories
-│   │   ├── Nux/                         # Full clone (BEADS_DIR=../../.beads)
-│   │   │   ├── .git/                    # Independent .git
-│   │   │   └── <project files>
-│   │   ├── Toast/                       # Full clone
-│   │   └── Capable/                     # Full clone
+│   │   └── config.yaml                  # Beads config (prefix, sync settings)
 │   │
 │   ├── refinery/                        # Refinery agent
 │   │   ├── rig/                         # Canonical "main" clone
 │   │   │   ├── .git/
 │   │   │   └── <project files>
-│   │   ├── mail/inbox.jsonl
 │   │   └── state.json
-│   │
-│   ├── witness/                         # Witness agent (pit boss)
-│   │   ├── mail/inbox.jsonl
-│   │   └── state.json
-│   │
-│   ├── crew/                            # Overseer's personal workspaces
-│   │   ├── dave/                        # Full clone (user-managed)
-│   │   │   ├── .git/
-│   │   │   └── <project files>
-│   │   ├── emma/                        # Full clone (user-managed)
-│   │   └── fred/                        # Full clone (user-managed)
 │   │
 │   ├── mayor/                           # Mayor's rig-specific clone
 │   │   ├── rig/                         # Mayor's clone for this rig
@@ -291,12 +271,26 @@ For reference without mermaid rendering:
 │   │   │   └── <project files>
 │   │   └── state.json
 │   │
+│   ├── witness/                         # Witness agent (pit boss)
+│   │   └── state.json                   # No clone needed
+│   │
+│   ├── crew/                            # Overseer's personal workspaces
+│   │   └── main/                        # Default workspace (full clone)
+│   │       ├── .git/
+│   │       └── <project files>
+│   │
+│   ├── polecats/                        # Worker directories (initially empty)
+│   │   ├── Nux/                         # Full clone (BEADS_DIR=../../.beads)
+│   │   │   ├── .git/
+│   │   │   └── <project files>
+│   │   └── Toast/                       # Full clone
+│   │
 │   └── plugins/                         # Optional plugins
 │       └── merge-oracle/
 │           ├── CLAUDE.md
 │           └── mail/inbox.jsonl
 │
-└── beads/                               # Another rig (same structure)
+└── wyvern/                              # Another rig (same structure)
     ├── config.json
     ├── .beads/
     ├── polecats/
