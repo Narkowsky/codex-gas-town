@@ -201,6 +201,30 @@ func (g *Git) Merge(branch string) error {
 	return err
 }
 
+// MergeNoFF merges the given branch with --no-ff (no fast-forward).
+// This always creates a merge commit even if fast-forward is possible.
+func (g *Git) MergeNoFF(branch, message string) error {
+	_, err := g.run("merge", "--no-ff", "-m", message, branch)
+	return err
+}
+
+// DeleteRemoteBranch deletes a branch from the remote.
+func (g *Git) DeleteRemoteBranch(remote, branch string) error {
+	_, err := g.run("push", remote, "--delete", branch)
+	return err
+}
+
+// Reset resets the current branch to the given ref.
+// If hard is true, uses --hard (discards working tree changes).
+func (g *Git) Reset(ref string, hard bool) error {
+	args := []string{"reset", ref}
+	if hard {
+		args = []string{"reset", "--hard", ref}
+	}
+	_, err := g.run(args...)
+	return err
+}
+
 // Rebase rebases the current branch onto the given ref.
 func (g *Git) Rebase(onto string) error {
 	_, err := g.run("rebase", onto)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -155,7 +156,7 @@ branch is landed to main as a single atomic unit.
 
 Commands:
   create  Create an integration branch for an epic
-  land    Merge integration branch to main (not yet implemented)
+  land    Merge integration branch to main
   status  Show integration branch status (not yet implemented)`,
 }
 
@@ -178,6 +179,36 @@ Example:
   # Creates integration/gt-auth-epic from main`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMqIntegrationCreate,
+}
+
+// Integration land command flags
+var (
+	mqIntegrationLandForce     bool
+	mqIntegrationLandSkipTests bool
+	mqIntegrationLandDryRun    bool
+)
+
+var mqIntegrationLandCmd = &cobra.Command{
+	Use:   "land <epic-id>",
+	Short: "Merge integration branch to main",
+	Long: `Merge an integration branch for an epic to main.
+
+This command lands an entire epic's work atomically. It:
+  1. Verifies all MRs targeting integration/<epic> are merged
+  2. Verifies integration branch exists
+  3. Merges integration/<epic> to main (--no-ff)
+  4. Runs tests on main (configurable)
+  5. Pushes to origin
+  6. Deletes integration branch
+  7. Updates epic status
+
+Examples:
+  gt mq integration land gt-auth-epic
+  gt mq integration land gt-auth-epic --force       # Land even if open MRs
+  gt mq integration land gt-auth-epic --skip-tests  # Skip test run
+  gt mq integration land gt-auth-epic --dry-run     # Preview only`,
+	Args: cobra.ExactArgs(1),
+	RunE: runMqIntegrationLand,
 }
 
 func init() {
@@ -212,8 +243,14 @@ func init() {
 	mqCmd.AddCommand(mqRejectCmd)
 	mqCmd.AddCommand(mqStatusCmd)
 
+	// Integration land flags
+	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandForce, "force", false, "Land even if some MRs are still open")
+	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandSkipTests, "skip-tests", false, "Skip test run")
+	mqIntegrationLandCmd.Flags().BoolVar(&mqIntegrationLandDryRun, "dry-run", false, "Preview only, don't make changes")
+
 	// Integration branch subcommands
 	mqIntegrationCmd.AddCommand(mqIntegrationCreateCmd)
+	mqIntegrationCmd.AddCommand(mqIntegrationLandCmd)
 	mqCmd.AddCommand(mqIntegrationCmd)
 
 	rootCmd.AddCommand(mqCmd)
@@ -1141,4 +1178,263 @@ func addIntegrationBranchField(description, branchName string) string {
 	}
 
 	return strings.Join(newLines, "\n")
+}
+
+// runMqIntegrationLand merges an integration branch to main.
+func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
+	epicID := args[0]
+
+	// Find workspace
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Find current rig
+	_, r, err := findCurrentRig(townRoot)
+	if err != nil {
+		return err
+	}
+
+	// Initialize beads for the rig
+	bd := beads.New(r.Path)
+
+	// 1. Verify epic exists
+	epic, err := bd.Show(epicID)
+	if err != nil {
+		if err == beads.ErrNotFound {
+			return fmt.Errorf("epic '%s' not found", epicID)
+		}
+		return fmt.Errorf("fetching epic: %w", err)
+	}
+
+	if epic.Type != "epic" {
+		return fmt.Errorf("'%s' is a %s, not an epic", epicID, epic.Type)
+	}
+
+	// Build integration branch name
+	branchName := "integration/" + epicID
+
+	// Initialize git for the rig
+	g := git.NewGit(r.Path)
+
+	// 2. Verify integration branch exists
+	exists, err := g.RemoteBranchExists("origin", branchName)
+	if err != nil {
+		return fmt.Errorf("checking integration branch: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("integration branch '%s' does not exist on origin", branchName)
+	}
+
+	// Fetch latest
+	fmt.Printf("Fetching latest from origin...\n")
+	if err := g.Fetch("origin"); err != nil {
+		return fmt.Errorf("fetching from origin: %w", err)
+	}
+
+	// 3. Check for open MRs targeting this integration branch
+	openMRs, err := findOpenMRsForIntegration(bd, branchName)
+	if err != nil {
+		return fmt.Errorf("checking open MRs: %w", err)
+	}
+
+	if len(openMRs) > 0 && !mqIntegrationLandForce {
+		fmt.Printf("%s Cannot land: %d open MR(s) targeting %s\n\n",
+			style.Bold.Render("⚠"), len(openMRs), branchName)
+		for _, mr := range openMRs {
+			fields := beads.ParseMRFields(mr)
+			worker := ""
+			if fields != nil {
+				worker = fields.Worker
+			}
+			fmt.Printf("  - %s: %s (worker: %s)\n", mr.ID, mr.Title, worker)
+		}
+		fmt.Printf("\nUse --force to land anyway.\n")
+		return nil
+	}
+
+	if len(openMRs) > 0 && mqIntegrationLandForce {
+		fmt.Printf("%s Forcing land with %d open MR(s)\n\n",
+			style.Dim.Render("⚠"), len(openMRs))
+	}
+
+	// Dry run mode - just show what would happen
+	if mqIntegrationLandDryRun {
+		fmt.Printf("\n%s Dry run - would perform:\n", style.Bold.Render("📋"))
+		fmt.Printf("  1. Checkout main\n")
+		fmt.Printf("  2. Merge %s into main (--no-ff)\n", branchName)
+		if !mqIntegrationLandSkipTests {
+			fmt.Printf("  3. Run tests\n")
+		}
+		fmt.Printf("  4. Push to origin\n")
+		fmt.Printf("  5. Delete branch %s (local and remote)\n", branchName)
+		fmt.Printf("  6. Close epic %s\n", epicID)
+		return nil
+	}
+
+	// Save current branch to restore on failure
+	origBranch, err := g.CurrentBranch()
+	if err != nil {
+		return fmt.Errorf("getting current branch: %w", err)
+	}
+
+	// Ensure working directory is clean
+	status, err := g.Status()
+	if err != nil {
+		return fmt.Errorf("checking git status: %w", err)
+	}
+	if !status.Clean {
+		return fmt.Errorf("working directory has uncommitted changes; commit or stash first")
+	}
+
+	// 4. Checkout main
+	fmt.Printf("Checking out main...\n")
+	if err := g.Checkout("main"); err != nil {
+		return fmt.Errorf("checkout main: %w", err)
+	}
+
+	// Pull latest main
+	fmt.Printf("Pulling latest main...\n")
+	if err := g.Pull("origin", "main"); err != nil {
+		_ = g.Checkout(origBranch)
+		return fmt.Errorf("pulling main: %w", err)
+	}
+
+	// 5. Merge integration branch to main with --no-ff
+	mergeMsg := fmt.Sprintf("Merge %s: Land epic %s\n\nMerges all work from integration branch.", branchName, epicID)
+	fmt.Printf("Merging %s to main...\n", branchName)
+	if err := g.MergeNoFF("origin/"+branchName, mergeMsg); err != nil {
+		_ = g.AbortMerge()
+		_ = g.Checkout(origBranch)
+		if err == git.ErrMergeConflict {
+			return fmt.Errorf("merge conflict; resolve manually or rebase the integration branch")
+		}
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	// Get the merge commit SHA
+	mergeCommit, _ := g.Rev("HEAD")
+
+	// 6. Run tests (unless skipped)
+	if !mqIntegrationLandSkipTests {
+		fmt.Printf("Running tests...\n")
+		if err := runRigTests(r.Path); err != nil {
+			// Rollback the merge
+			fmt.Printf("%s Tests failed, rolling back merge\n", style.Bold.Render("✗"))
+			_ = g.Reset("HEAD~1", true)
+			_ = g.Checkout(origBranch)
+			return fmt.Errorf("tests failed: %w", err)
+		}
+		fmt.Printf("%s Tests passed\n", style.Bold.Render("✓"))
+	}
+
+	// 7. Push to origin
+	fmt.Printf("Pushing to origin...\n")
+	if err := g.Push("origin", "main", false); err != nil {
+		// Rollback the merge
+		fmt.Printf("%s Push failed, rolling back merge\n", style.Bold.Render("✗"))
+		_ = g.Reset("HEAD~1", true)
+		_ = g.Checkout(origBranch)
+		return fmt.Errorf("push failed: %w", err)
+	}
+
+	// 8. Delete integration branch (local and remote)
+	fmt.Printf("Deleting integration branch...\n")
+
+	// Delete local branch if it exists
+	localExists, _ := g.BranchExists(branchName)
+	if localExists {
+		if err := g.DeleteBranch(branchName, true); err != nil {
+			fmt.Printf("  %s\n", style.Dim.Render("(warning: could not delete local branch)"))
+		}
+	}
+
+	// Delete remote branch
+	if err := g.DeleteRemoteBranch("origin", branchName); err != nil {
+		fmt.Printf("  %s\n", style.Dim.Render("(warning: could not delete remote branch)"))
+	}
+
+	// 9. Update epic status - close it with merge info
+	if err := bd.CloseWithReason(epicID, fmt.Sprintf("Landed to main via integration branch. Merge commit: %s", mergeCommit)); err != nil {
+		// Fallback to simple close
+		if err := bd.Close(epicID); err != nil {
+			fmt.Printf("  %s\n", style.Dim.Render("(warning: could not close epic)"))
+		}
+	}
+
+	// Restore original branch (or stay on main)
+	if origBranch != branchName && origBranch != "main" {
+		_ = g.Checkout(origBranch)
+	}
+
+	// Success output
+	fmt.Printf("\n%s Landed epic to main\n", style.Bold.Render("✓"))
+	fmt.Printf("  Epic:         %s\n", epicID)
+	fmt.Printf("  Branch:       %s\n", branchName)
+	fmt.Printf("  Merge commit: %s\n", mergeCommit[:12])
+
+	return nil
+}
+
+// findOpenMRsForIntegration finds open MRs targeting the given integration branch.
+func findOpenMRsForIntegration(bd *beads.Beads, integrationBranch string) ([]*beads.Issue, error) {
+	// List all open merge-requests
+	opts := beads.ListOptions{
+		Type:   "merge-request",
+		Status: "open",
+	}
+	issues, err := bd.List(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter to those targeting this integration branch
+	var matching []*beads.Issue
+	for _, issue := range issues {
+		fields := beads.ParseMRFields(issue)
+		if fields != nil && fields.Target == integrationBranch {
+			matching = append(matching, issue)
+		}
+	}
+
+	return matching, nil
+}
+
+// runRigTests runs tests for the rig. Returns an error if tests fail.
+func runRigTests(rigPath string) error {
+	// Try to detect test command from rig config or use defaults
+	// For now, use common test commands based on what's present
+
+	// Check for go.mod (Go project)
+	goModPath := filepath.Join(rigPath, "go.mod")
+	if _, err := os.Stat(goModPath); err == nil {
+		return runTestCommand(rigPath, "go", "test", "./...")
+	}
+
+	// Check for package.json (Node.js project)
+	packagePath := filepath.Join(rigPath, "package.json")
+	if _, err := os.Stat(packagePath); err == nil {
+		return runTestCommand(rigPath, "npm", "test")
+	}
+
+	// Check for Makefile with test target
+	makefilePath := filepath.Join(rigPath, "Makefile")
+	if _, err := os.Stat(makefilePath); err == nil {
+		return runTestCommand(rigPath, "make", "test")
+	}
+
+	// No test runner found, skip tests
+	fmt.Printf("  %s\n", style.Dim.Render("(no test runner detected, skipping tests)"))
+	return nil
+}
+
+// runTestCommand runs a test command in the given directory.
+func runTestCommand(dir string, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
