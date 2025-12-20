@@ -1773,10 +1773,10 @@ Workers sometimes get confused about which database they're in, especially when:
 
 **Processing**:
 1. Scan each beads database for prefix mismatches
-   - Town-level should have harness prefix (e.g., `stevetown-*`)
+   - Town-level should have `hq-*` prefix (headquarters)
    - Rig-level should have rig prefix (e.g., `gt-*` for gastown)
 2. Check for cross-level dependency references
-   - Flag `gt-*` issues that depend on `stevetown-*` (usually wrong)
+   - Flag `gt-*` issues that depend on `hq-*` (usually wrong)
 3. Analyze recent activity for context confusion
    - Agent in `gastown/` creating harness-level issues
    - Agent at town level creating rig-specific issues
@@ -1801,7 +1801,7 @@ You are reviewing beads databases for cross-pollution between Gas Town's
 two-level architecture:
 
 TOWN LEVEL (~/gt/.beads/): Coordination, mayor mail, harness issues
-  - Prefix: stevetown-* (or configured harness prefix)
+  - Prefix: hq-* (headquarters)
   - Contains: cross-rig coordination, strategic planning, harness bugs
 
 RIG LEVEL (~/gt/<rig>/.beads/): Project-specific work
