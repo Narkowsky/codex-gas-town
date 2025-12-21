@@ -284,6 +284,8 @@ func ParseMessageType(s string) MessageType {
 //   - "gastown/Toast" → "gastown-Toast"
 //   - "gastown/refinery" → "gastown-refinery"
 //   - "gastown/" → "gastown" (rig broadcast)
+//   - "beads/crew/dave" → "beads-dave" (crew/ stripped)
+//   - "beads/polecats/nux" → "beads-nux" (polecats/ stripped)
 func addressToIdentity(address string) string {
 	// Town-level agents: mayor and deacon keep trailing slash
 	if address == "mayor" || address == "mayor/" {
@@ -297,6 +299,12 @@ func addressToIdentity(address string) string {
 	if len(address) > 0 && address[len(address)-1] == '/' {
 		address = address[:len(address)-1]
 	}
+
+	// Normalize worker paths: strip crew/ and polecats/ from path
+	// beads/crew/dave → beads/dave (both resolve to beads-dave)
+	// beads/polecats/nux → beads/nux (both resolve to beads-nux)
+	address = strings.Replace(address, "/crew/", "/", 1)
+	address = strings.Replace(address, "/polecats/", "/", 1)
 
 	// Replace / with - for beads identity
 	// gastown/Toast → gastown-Toast
