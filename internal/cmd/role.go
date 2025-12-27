@@ -155,6 +155,21 @@ func GetRoleWithContext(cwd, townRoot string) (RoleInfo, error) {
 		info.Polecat = polecat
 		info.Source = "env"
 
+		// For simple role strings like "crew" or "polecat", also check
+		// GT_RIG and GT_CREW/GT_POLECAT env vars for the full identity
+		if info.Rig == "" {
+			if envRig := os.Getenv("GT_RIG"); envRig != "" {
+				info.Rig = envRig
+			}
+		}
+		if info.Polecat == "" {
+			if envCrew := os.Getenv("GT_CREW"); envCrew != "" {
+				info.Polecat = envCrew
+			} else if envPolecat := os.Getenv("GT_POLECAT"); envPolecat != "" {
+				info.Polecat = envPolecat
+			}
+		}
+
 		// Check for mismatch with cwd detection
 		if cwdCtx.Role != RoleUnknown && cwdCtx.Role != parsedRole {
 			info.Mismatch = true
