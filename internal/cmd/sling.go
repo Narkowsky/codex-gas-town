@@ -842,9 +842,9 @@ func detectActor() string {
 }
 
 // agentIDToBeadID converts an agent ID to its corresponding agent bead ID.
-// Uses canonical naming: gt-rig-role-name
-// Agent beads always use "gt-" prefix (required by beads validation).
-// Only issue beads use rig-specific prefixes.
+// Uses canonical naming: prefix-rig-role-name
+// This function uses "gt-" prefix by default. For non-gastown rigs, use the
+// appropriate *WithPrefix functions that accept the rig's configured prefix.
 func agentIDToBeadID(agentID string) string {
 	// Handle simple cases (town-level agents)
 	if agentID == "mayor" {

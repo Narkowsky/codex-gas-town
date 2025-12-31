@@ -1011,22 +1011,27 @@ func PolecatBeadID(rig, name string) string {
 // Returns rig, role, name, and whether parsing succeeded.
 // For town-level agents, rig will be empty.
 // For singletons, name will be empty.
+// Accepts any valid prefix (e.g., "gt-", "bd-"), not just "gt-".
 func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
-	if !strings.HasPrefix(id, "gt-") {
+	// Find the prefix (everything before the first hyphen)
+	// Valid prefixes are 2-3 characters (e.g., "gt", "bd", "hq")
+	hyphenIdx := strings.Index(id, "-")
+	if hyphenIdx < 2 || hyphenIdx > 3 {
 		return "", "", "", false
 	}
-	rest := strings.TrimPrefix(id, "gt-")
+
+	rest := id[hyphenIdx+1:]
 	parts := strings.Split(rest, "-")
 
 	switch len(parts) {
 	case 1:
-		// Town-level: gt-mayor, gt-deacon
+		// Town-level: gt-mayor, bd-deacon
 		return "", parts[0], "", true
 	case 2:
-		// Rig-level singleton: gt-gastown-witness
+		// Rig-level singleton: gt-gastown-witness, bd-beads-witness
 		return parts[0], parts[1], "", true
 	case 3:
-		// Rig-level named: gt-gastown-crew-max
+		// Rig-level named: gt-gastown-crew-max, bd-beads-polecat-pearl
 		return parts[0], parts[1], parts[2], true
 	default:
 		// Handle names with hyphens: gt-gastown-polecat-my-agent-name
@@ -1038,7 +1043,8 @@ func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
 }
 
 // IsAgentSessionBead returns true if the bead ID represents an agent session molecule.
-// Agent session beads follow patterns like gt-mayor, gt-gastown-witness, gt-gastown-crew-joe.
+// Agent session beads follow patterns like gt-mayor, bd-beads-witness, gt-gastown-crew-joe.
+// Supports any valid prefix (e.g., "gt-", "bd-"), not just "gt-".
 // These are used to track agent state and update frequently, which can create noise.
 func IsAgentSessionBead(beadID string) bool {
 	_, role, _, ok := ParseAgentBeadID(beadID)

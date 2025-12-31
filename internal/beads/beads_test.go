@@ -1019,8 +1019,14 @@ func TestParseAgentBeadID(t *testing.T) {
 		{"gt-gastown-polecat-my-agent", "gastown", "polecat", "my-agent", true},
 		// Parseable but not valid agent roles (IsAgentSessionBead will reject)
 		{"gt-abc123", "", "abc123", "", true}, // Parses as town-level but not valid role
+		// Other prefixes (bd-, hq-)
+		{"bd-mayor", "", "mayor", "", true},                               // bd prefix town-level
+		{"bd-beads-witness", "beads", "witness", "", true},                // bd prefix rig-level singleton
+		{"bd-beads-polecat-pearl", "beads", "polecat", "pearl", true},     // bd prefix rig-level named
+		{"hq-mayor", "", "mayor", "", true},                               // hq prefix town-level
 		// Truly invalid patterns
-		{"bd-gastown-crew-joe", "", "", "", false}, // Wrong prefix
+		{"x-mayor", "", "", "", false},    // Prefix too short (1 char)
+		{"abcd-mayor", "", "", "", false}, // Prefix too long (4 chars)
 		{"", "", "", "", false},
 	}
 
@@ -1049,19 +1055,26 @@ func TestIsAgentSessionBead(t *testing.T) {
 		beadID string
 		want   bool
 	}{
-		// Agent session beads (should return true)
+		// Agent session beads with gt- prefix (should return true)
 		{"gt-mayor", true},
 		{"gt-deacon", true},
 		{"gt-gastown-witness", true},
 		{"gt-gastown-refinery", true},
 		{"gt-gastown-crew-joe", true},
 		{"gt-gastown-polecat-capable", true},
+		// Agent session beads with bd- prefix (should return true)
+		{"bd-mayor", true},
+		{"bd-deacon", true},
+		{"bd-beads-witness", true},
+		{"bd-beads-refinery", true},
+		{"bd-beads-crew-joe", true},
+		{"bd-beads-polecat-pearl", true},
 		// Regular work beads (should return false)
 		{"gt-abc123", false},
 		{"gt-sb6m4", false},
 		{"gt-u7dxq", false},
-		// Invalid beads
 		{"bd-abc123", false},
+		// Invalid beads
 		{"", false},
 	}
 
