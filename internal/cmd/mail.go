@@ -294,6 +294,30 @@ Examples:
 	RunE: runMailRelease,
 }
 
+var mailClearCmd = &cobra.Command{
+	Use:   "clear [target]",
+	Short: "Clear all messages from an inbox",
+	Long: `Clear (delete) all messages from an inbox.
+
+SYNTAX:
+  gt mail clear              # Clear your own inbox
+  gt mail clear <target>     # Clear another agent's inbox
+
+BEHAVIOR:
+1. List all messages in the target inbox
+2. Delete each message
+3. Print count of deleted messages
+
+Use case: Town quiescence - reset all inboxes across workers efficiently.
+
+Examples:
+  gt mail clear                      # Clear your inbox
+  gt mail clear gastown/polecats/joe # Clear joe's inbox
+  gt mail clear mayor/               # Clear mayor's inbox`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runMailClear,
+}
+
 func init() {
 	// Send flags
 	mailSendCmd.Flags().StringVarP(&mailSubject, "subject", "s", "", "Message subject (required)")
@@ -345,6 +369,7 @@ func init() {
 	mailCmd.AddCommand(mailReplyCmd)
 	mailCmd.AddCommand(mailClaimCmd)
 	mailCmd.AddCommand(mailReleaseCmd)
+	mailCmd.AddCommand(mailClearCmd)
 
 	rootCmd.AddCommand(mailCmd)
 }
@@ -741,6 +766,65 @@ func runMailArchive(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Message archived\n", style.Bold.Render("✓"))
+	return nil
+}
+
+func runMailClear(cmd *cobra.Command, args []string) error {
+	// Determine which inbox to clear (target arg or auto-detect)
+	address := ""
+	if len(args) > 0 {
+		address = args[0]
+	} else {
+		address = detectSender()
+	}
+
+	// All mail uses town beads (two-level architecture)
+	workDir, err := findMailWorkDir()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Get mailbox
+	router := mail.NewRouter(workDir)
+	mailbox, err := router.GetMailbox(address)
+	if err != nil {
+		return fmt.Errorf("getting mailbox: %w", err)
+	}
+
+	// List all messages
+	messages, err := mailbox.List()
+	if err != nil {
+		return fmt.Errorf("listing messages: %w", err)
+	}
+
+	if len(messages) == 0 {
+		fmt.Printf("%s Inbox %s is already empty\n", style.Dim.Render("○"), address)
+		return nil
+	}
+
+	// Delete each message
+	deleted := 0
+	var errors []string
+	for _, msg := range messages {
+		if err := mailbox.Delete(msg.ID); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", msg.ID, err))
+		} else {
+			deleted++
+		}
+	}
+
+	// Report results
+	if len(errors) > 0 {
+		fmt.Printf("%s Cleared %d/%d messages from %s\n",
+			style.Bold.Render("⚠"), deleted, len(messages), address)
+		for _, e := range errors {
+			fmt.Printf("  Error: %s\n", e)
+		}
+		return fmt.Errorf("failed to clear %d messages", len(errors))
+	}
+
+	fmt.Printf("%s Cleared %d messages from %s\n",
+		style.Bold.Render("✓"), deleted, address)
 	return nil
 }
 
