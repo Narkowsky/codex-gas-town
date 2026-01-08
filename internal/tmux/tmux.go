@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -556,9 +557,19 @@ func (t *Tmux) IsAgentRunning(session string, expectedPaneCommands ...string) bo
 
 // IsClaudeRunning checks if Claude appears to be running in the session.
 // Only trusts the pane command - UI markers in scrollback cause false positives.
+// Claude can report as "node", "claude", or a version number like "2.0.76".
 func (t *Tmux) IsClaudeRunning(session string) bool {
-	// Claude runs as node
-	return t.IsAgentRunning(session, "node")
+	// Check for known command names first
+	if t.IsAgentRunning(session, "node", "claude") {
+		return true
+	}
+	// Check for version pattern (e.g., "2.0.76") - Claude Code shows version as pane command
+	cmd, err := t.GetPaneCommand(session)
+	if err != nil {
+		return false
+	}
+	matched, _ := regexp.MatchString(`^\d+\.\d+\.\d+`, cmd)
+	return matched
 }
 
 // WaitForCommand polls until the pane is NOT running one of the excluded commands.
