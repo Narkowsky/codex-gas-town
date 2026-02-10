@@ -433,7 +433,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		fields := &beads.RigFields{
 			Repo:   gitURL,
 			Prefix: newRig.Config.Prefix,
-			State:  "active",
+			State:  beads.RigStateActive,
 		}
 		if _, err := bd.CreateRigBead(rigBeadID, name, fields); err != nil {
 			// Non-fatal: rig is functional without the identity bead

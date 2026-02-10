@@ -159,7 +159,7 @@ func (c *RigBeadsCheck) Fix(ctx *CheckContext) error {
 			fields := &beads.RigFields{
 				Repo:   gitURL,
 				Prefix: info.prefix,
-				State:  "active",
+				State:  beads.RigStateActive,
 			}
 
 			if _, err := bd.CreateRigBead(rigBeadID, rigName, fields); err != nil {

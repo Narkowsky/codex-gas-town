@@ -8,11 +8,32 @@ import (
 	"strings"
 )
 
+// RigState represents the operational state of a rig.
+type RigState string
+
+const (
+	// RigStateActive means the rig is operational and accepting work.
+	RigStateActive RigState = "active"
+	// RigStateArchived means the rig is no longer in use.
+	RigStateArchived RigState = "archived"
+	// RigStateMaintenance means the rig is temporarily offline for maintenance.
+	RigStateMaintenance RigState = "maintenance"
+)
+
+// ValidRigState returns true if the given state is a recognized rig state.
+func ValidRigState(s RigState) bool {
+	switch s {
+	case RigStateActive, RigStateArchived, RigStateMaintenance:
+		return true
+	}
+	return false
+}
+
 // RigFields contains the fields specific to rig identity beads.
 type RigFields struct {
-	Repo   string // Git URL for the rig's repository
-	Prefix string // Beads prefix for this rig (e.g., "gt", "bd")
-	State  string // Operational state: active, archived, maintenance
+	Repo   string   // Git URL for the rig's repository
+	Prefix string   // Beads prefix for this rig (e.g., "gt", "bd")
+	State  RigState // Operational state: active, archived, maintenance
 }
 
 // FormatRigDescription formats the description field for a rig identity bead.
@@ -32,7 +53,7 @@ func FormatRigDescription(name string, fields *RigFields) string {
 		lines = append(lines, fmt.Sprintf("prefix: %s", fields.Prefix))
 	}
 	if fields.State != "" {
-		lines = append(lines, fmt.Sprintf("state: %s", fields.State))
+		lines = append(lines, fmt.Sprintf("state: %s", string(fields.State)))
 	}
 
 	return strings.Join(lines, "\n")
@@ -65,7 +86,7 @@ func ParseRigFields(description string) *RigFields {
 		case "prefix":
 			fields.Prefix = value
 		case "state":
-			fields.State = value
+			fields.State = RigState(value)
 		}
 	}
 
@@ -77,6 +98,10 @@ func ParseRigFields(description string) *RigFields {
 // Use RigBeadID() helper to generate correct IDs.
 // The created_by field is populated from BD_ACTOR env var for provenance tracking.
 func (b *Beads) CreateRigBead(id, title string, fields *RigFields) (*Issue, error) {
+	if fields != nil && fields.State != "" && !ValidRigState(fields.State) {
+		return nil, fmt.Errorf("invalid rig state %q: must be one of active, archived, maintenance", fields.State)
+	}
+
 	description := FormatRigDescription(title, fields)
 
 	args := []string{"create", "--json",

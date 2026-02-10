@@ -24,7 +24,7 @@ func TestFormatRigDescription(t *testing.T) {
 			fields: &RigFields{
 				Repo:   "git@github.com:user/gastown.git",
 				Prefix: "gt",
-				State:  "active",
+				State:  RigStateActive,
 			},
 			want: []string{
 				"Rig identity bead for gastown.",
@@ -93,7 +93,7 @@ state: active`,
 			want: &RigFields{
 				Repo:   "git@github.com:user/gastown.git",
 				Prefix: "gt",
-				State:  "active",
+				State:  RigStateActive,
 			},
 		},
 		{
@@ -116,7 +116,7 @@ state: active`,
 			name: "state maintenance",
 			desc: "state: maintenance\nprefix: gt",
 			want: &RigFields{
-				State:  "maintenance",
+				State:  RigStateMaintenance,
 				Prefix: "gt",
 			},
 		},
@@ -142,7 +142,7 @@ func TestRigFieldsRoundTrip(t *testing.T) {
 	original := &RigFields{
 		Repo:   "git@github.com:user/gastown.git",
 		Prefix: "gt",
-		State:  "active",
+		State:  RigStateActive,
 	}
 
 	formatted := FormatRigDescription("gastown", original)
@@ -193,6 +193,28 @@ func TestRigBeadIDWithPrefix(t *testing.T) {
 		t.Run(tt.prefix+"-"+tt.name, func(t *testing.T) {
 			if got := RigBeadIDWithPrefix(tt.prefix, tt.name); got != tt.want {
 				t.Errorf("RigBeadIDWithPrefix(%q, %q) = %q, want %q", tt.prefix, tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidRigState(t *testing.T) {
+	tests := []struct {
+		state RigState
+		want  bool
+	}{
+		{RigStateActive, true},
+		{RigStateArchived, true},
+		{RigStateMaintenance, true},
+		{"", false},
+		{"invalid", false},
+		{"ACTIVE", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			if got := ValidRigState(tt.state); got != tt.want {
+				t.Errorf("ValidRigState(%q) = %v, want %v", tt.state, got, tt.want)
 			}
 		})
 	}
