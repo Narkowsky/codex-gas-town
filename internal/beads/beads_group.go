@@ -6,9 +6,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// groupNameRegex matches valid group names: lowercase alphanumeric, hyphens, underscores.
+var groupNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// MaxGroupNameLength is the maximum allowed length for a group name.
+const MaxGroupNameLength = 64
+
+// ValidateGroupName checks that a group name is valid.
+// Rules: non-empty, max 64 chars, lowercase alphanumeric plus hyphens/underscores,
+// must start with alphanumeric, no leading/trailing whitespace.
+func ValidateGroupName(name string) error {
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("group name %q has leading or trailing whitespace", name)
+	}
+	if name == "" {
+		return fmt.Errorf("group name must not be empty")
+	}
+	if len(name) > MaxGroupNameLength {
+		return fmt.Errorf("group name %q is too long (%d chars, max %d)", name, len(name), MaxGroupNameLength)
+	}
+	if !groupNameRegex.MatchString(name) {
+		return fmt.Errorf("group name %q is invalid: must be lowercase alphanumeric, hyphens, or underscores, starting with alphanumeric", name)
+	}
+	return nil
+}
 
 // GroupFields holds structured fields for group beads.
 // These are stored as "key: value" lines in the description.
@@ -114,6 +140,9 @@ func GroupBeadID(name string) string {
 // Groups are town-level entities (hq- prefix) because they span rigs.
 // The created_by field is populated from BD_ACTOR env var for provenance tracking.
 func (b *Beads) CreateGroupBead(name string, fields *GroupFields) (*Issue, error) {
+	if err := ValidateGroupName(name); err != nil {
+		return nil, err
+	}
 	id := GroupBeadID(name)
 	title := fmt.Sprintf("Group: %s", name)
 
