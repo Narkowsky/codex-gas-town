@@ -82,9 +82,13 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting crew worker: %w", err)
 	}
 
-	// Only reset to default branch if --reset flag is passed
+	// Reset to default branch if --reset flag is passed; otherwise warn if off-branch
 	if crewReset {
-		ensureDefaultBranch(worker.ClonePath, fmt.Sprintf("Crew workspace %s/%s", r.Name, name), r.Path)
+		if err := ensureDefaultBranch(worker.ClonePath, fmt.Sprintf("Crew workspace %s/%s", r.Name, name), r.Path); err != nil {
+			return fmt.Errorf("resetting to default branch: %w", err)
+		}
+	} else {
+		warnIfNotDefaultBranch(worker.ClonePath, fmt.Sprintf("Crew workspace %s/%s", r.Name, name), r.Path)
 	}
 
 	// If --no-tmux, just print the path

@@ -110,8 +110,9 @@ When run from outside tmux, you are attached to the session (unless
 --detached is specified).
 
 Branch Handling:
-  By default, the workspace stays on its current branch. Use --reset to
-  switch to the default branch and pull latest changes.
+  By default, the workspace stays on its current branch (a warning is
+  shown if not on the default branch). Use --reset to switch to the
+  default branch and pull latest changes.
 
 Role Discovery:
   If no name is provided, attempts to detect the crew workspace from the
