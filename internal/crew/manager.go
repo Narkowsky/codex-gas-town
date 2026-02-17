@@ -76,6 +76,28 @@ func validateSessionID(id string) error {
 	return nil
 }
 
+// buildResumeArgs validates the agent preset supports resume and returns the
+// flag(s) to append to the command string. agentName is the resolved agent
+// preset name (e.g. "claude", "gemini"). sessionID is "last" for auto-resume
+// or a specific session ID.
+func buildResumeArgs(agentName, sessionID string) (string, error) {
+	preset := config.GetAgentPresetByName(agentName)
+	if preset == nil || preset.ResumeFlag == "" {
+		return "", fmt.Errorf("agent %q does not support session resume", agentName)
+	}
+	if preset.ResumeStyle == "subcommand" {
+		return "", fmt.Errorf("--resume not yet supported for subcommand-style agents (e.g., %s); use the agent's native resume mechanism", agentName)
+	}
+
+	if sessionID == "last" {
+		if preset.ContinueFlag == "" {
+			return "", fmt.Errorf("agent %q does not support --resume without a session ID (no ContinueFlag configured); use --resume <session-id> instead", agentName)
+		}
+		return preset.ContinueFlag, nil
+	}
+	return preset.ResumeFlag + " " + config.ShellQuote(sessionID), nil
+}
+
 // validateCrewName checks that a crew name is safe and valid.
 // Rejects path traversal attempts and characters that break agent ID parsing.
 func validateCrewName(name string) error {
@@ -599,34 +621,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 		return fmt.Errorf("getting crew worker: %w", err)
 	}
 
-	t := tmux.NewTmux()
-	sessionID := m.SessionName(name)
-
-	// Check if session already exists
-	running, err := t.HasSession(sessionID)
-	if err != nil {
-		return fmt.Errorf("checking session: %w", err)
-	}
-	if running {
-		if opts.KillExisting {
-			// Restart mode - kill existing session.
-			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing existing session: %w", err)
-			}
-		} else {
-			// Normal start - session exists, check if agent is actually running
-			if t.IsAgentAlive(sessionID) {
-				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
-			}
-			// Zombie session - kill and recreate.
-			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
-			if err := t.KillSessionWithProcesses(sessionID); err != nil {
-				return fmt.Errorf("killing zombie session: %w", err)
-			}
-		}
-	}
-
 	// Ensure runtime settings exist in the shared crew parent directory.
 	// Settings are passed to Claude Code via --settings flag.
 	townRoot := filepath.Dir(m.rig.Path)
@@ -635,23 +629,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	if err := runtime.EnsureSettingsForRole(crewSettingsDir, worker.ClonePath, "crew", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
-
-	// Build the startup beacon for predecessor discovery via /resume
-	// Pass it as Claude's initial prompt - processed when Claude is ready
-	address := fmt.Sprintf("%s/crew/%s", m.rig.Name, name)
-	topic := opts.Topic
-	if topic == "" {
-		if opts.ResumeSessionID != "" {
-			topic = "resume"
-		} else {
-			topic = "start"
-		}
-	}
-	beacon := session.FormatStartupBeacon(session.BeaconConfig{
-		Recipient: address,
-		Sender:    "human",
-		Topic:     topic,
-	})
 
 	// Compute environment variables BEFORE creating the session.
 	// These are passed via tmux -e flags so the initial shell inherits the correct
@@ -671,6 +648,10 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Build startup command (also includes env vars via 'exec env' for
 	// WaitForCommand detection — belt and suspenders with -e flags)
 	// SessionStart hook handles context loading (gt prime --hook)
+	//
+	// IMPORTANT: All validation and command building happens BEFORE killing
+	// any existing session, so a validation failure cannot leave the user
+	// without a running session.
 	var claudeCmd string
 	if opts.ResumeSessionID != "" {
 		// Validate session ID to prevent shell injection. The ID is interpolated
@@ -697,34 +678,56 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 				agentName = "claude"
 			}
 		}
-		preset := config.GetAgentPresetByName(agentName)
-		if preset == nil || preset.ResumeFlag == "" {
-			return fmt.Errorf("agent %q does not support session resume", agentName)
+		resumeArgs, err := buildResumeArgs(agentName, opts.ResumeSessionID)
+		if err != nil {
+			return err
 		}
-		if preset.ResumeStyle == "subcommand" {
-			return fmt.Errorf("--resume not yet supported for subcommand-style agents (e.g., %s); use the agent's native resume mechanism", agentName)
-		}
-
-		// Append resume flag. Shell-quote the session ID as defense-in-depth
-		// (validateSessionID already rejects metacharacters, but belt and suspenders).
-		if opts.ResumeSessionID == "last" {
-			// Auto-resume most recent session. Some agents (e.g. Claude) use a
-			// separate flag (--continue) because --resume with no args opens an
-			// interactive picker instead of auto-resuming.
-			continueFlag := preset.ContinueFlag
-			if continueFlag == "" {
-				continueFlag = preset.ResumeFlag
-			}
-			claudeCmd += " " + continueFlag
-		} else {
-			// Resume specific session ID
-			claudeCmd += " " + preset.ResumeFlag + " " + config.ShellQuote(opts.ResumeSessionID)
-		}
+		claudeCmd += " " + resumeArgs
 	} else {
-		// Normal start: pass beacon as prompt
+		// Normal start: build beacon for predecessor discovery via /resume.
+		// Only used in fresh-start mode — resumed sessions already have context.
+		address := fmt.Sprintf("%s/crew/%s", m.rig.Name, name)
+		topic := opts.Topic
+		if topic == "" {
+			topic = "start"
+		}
+		beacon := session.FormatStartupBeacon(session.BeaconConfig{
+			Recipient: address,
+			Sender:    "human",
+			Topic:     topic,
+		})
 		claudeCmd, err = config.BuildCrewStartupCommandWithAgentOverride(m.rig.Name, name, m.rig.Path, beacon, opts.AgentOverride)
 		if err != nil {
 			return fmt.Errorf("building startup command: %w", err)
+		}
+	}
+
+	t := tmux.NewTmux()
+	sessionID := m.SessionName(name)
+
+	// Check if session already exists — kill AFTER command is fully built
+	// so validation failures don't destroy the user's running session.
+	running, err := t.HasSession(sessionID)
+	if err != nil {
+		return fmt.Errorf("checking session: %w", err)
+	}
+	if running {
+		if opts.KillExisting {
+			// Restart/resume mode - kill existing session.
+			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+			if err := t.KillSessionWithProcesses(sessionID); err != nil {
+				return fmt.Errorf("killing existing session: %w", err)
+			}
+		} else {
+			// Normal start - session exists, check if agent is actually running
+			if t.IsAgentAlive(sessionID) {
+				return fmt.Errorf("%w: %s", ErrSessionRunning, sessionID)
+			}
+			// Zombie session - kill and recreate.
+			// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+			if err := t.KillSessionWithProcesses(sessionID); err != nil {
+				return fmt.Errorf("killing zombie session: %w", err)
+			}
 		}
 	}
 

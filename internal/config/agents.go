@@ -68,7 +68,7 @@ type AgentPresetInfo struct {
 
 	// ContinueFlag is the flag for auto-resuming the most recent session.
 	// For claude: "--continue" (--resume without args opens interactive picker)
-	// If empty, falls back to ResumeFlag without arguments.
+	// If empty, --resume without a session ID is rejected with a clear error.
 	ContinueFlag string `json:"continue_flag,omitempty"`
 
 	// ResumeStyle indicates how to invoke resume:

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -622,6 +623,108 @@ func TestStartOptionsResumeValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildResumeArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		agent     string
+		sessionID string
+		wantArgs  string
+		wantErr   string
+	}{
+		// Claude: has ContinueFlag, flag-style resume
+		{
+			name:      "claude last uses --continue",
+			agent:     "claude",
+			sessionID: "last",
+			wantArgs:  "--continue",
+		},
+		{
+			name:      "claude specific ID uses --resume with ID",
+			agent:     "claude",
+			sessionID: "abc-123-def",
+			wantArgs:  "--resume abc-123-def",
+		},
+		// Gemini: no ContinueFlag, flag-style resume
+		{
+			name:      "gemini last errors without ContinueFlag",
+			agent:     "gemini",
+			sessionID: "last",
+			wantErr:   "does not support --resume without a session ID",
+		},
+		{
+			name:      "gemini specific ID works",
+			agent:     "gemini",
+			sessionID: "sess-456",
+			wantArgs:  "--resume sess-456",
+		},
+		// Codex: subcommand-style resume
+		{
+			name:      "codex rejected as subcommand-style",
+			agent:     "codex",
+			sessionID: "last",
+			wantErr:   "subcommand-style agents",
+		},
+		{
+			name:      "codex specific ID also rejected",
+			agent:     "codex",
+			sessionID: "abc-123",
+			wantErr:   "subcommand-style agents",
+		},
+		// Cursor: no ContinueFlag, flag-style resume
+		{
+			name:      "cursor last errors without ContinueFlag",
+			agent:     "cursor",
+			sessionID: "last",
+			wantErr:   "does not support --resume without a session ID",
+		},
+		{
+			name:      "cursor specific ID works",
+			agent:     "cursor",
+			sessionID: "chat-789",
+			wantArgs:  "--resume chat-789",
+		},
+		// OpenCode: no resume support at all
+		{
+			name:      "opencode rejected no resume support",
+			agent:     "opencode",
+			sessionID: "last",
+			wantErr:   "does not support session resume",
+		},
+		// Unknown agent
+		{
+			name:      "unknown agent rejected",
+			agent:     "nonexistent",
+			sessionID: "abc",
+			wantErr:   "does not support session resume",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildResumeArgs(tt.agent, tt.sessionID)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if got := err.Error(); !strings.Contains(got, tt.wantErr) {
+					t.Errorf("error %q does not contain %q", got, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.wantArgs {
+				t.Errorf("buildResumeArgs(%q, %q) = %q, want %q", tt.agent, tt.sessionID, got, tt.wantArgs)
+			}
+		})
+	}
+}
+
 
 // Helper to run commands
 func runCmd(name string, args ...string) error {
