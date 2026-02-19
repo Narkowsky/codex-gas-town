@@ -1,0 +1,130 @@
+name: Upstream Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git identity
+        run: |
+          git config user.name "codex-gas-town-sync[bot]"
+          git config user.email "codex-gas-town-sync[bot]@users.noreply.github.com"
+
+      - name: Ensure sync labels exist
+        run: |
+          gh label create upstream-sync --color 0E8A16 --description "Automated upstream synchronization" --force
+          gh label create needs-review --color FBCA04 --description "Requires maintainer review" --force
+          gh label create upstream-sync-conflict --color D93F0B --description "Upstream sync conflict requires manual resolution" --force
+
+      - name: Fetch upstream and origin main
+        run: |
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/steveyegge/gastown.git
+          fi
+          git fetch --no-tags origin main
+          git fetch --no-tags upstream main
+
+      - name: Merge upstream into sync branch
+        id: sync
+        run: |
+          set -euo pipefail
+          DATE_UTC="$(date -u +%Y-%m-%d)"
+          DATE_TAG="$(date -u +%Y%m%d)"
+          BRANCH="sync/upstream-${DATE_TAG}"
+
+          echo "date_utc=${DATE_UTC}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+          if git diff --quiet origin/main..upstream/main; then
+            echo "no_sync=true" >> "$GITHUB_OUTPUT"
+            echo "No sync needed. upstream/main matches origin/main."
+            exit 0
+          fi
+
+          echo "no_sync=false" >> "$GITHUB_OUTPUT"
+          git switch -C "$BRANCH" origin/main
+
+          if git merge --no-ff --no-edit upstream/main; then
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "Merge from upstream/main succeeded."
+          else
+            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+            conflict_files="$(git diff --name-only --diff-filter=U | tr '\n' '\n')"
+            conflict_body=$(cat <<EOF
+Automatic upstream sync encountered merge conflicts.
+
+Date: ${DATE_UTC}
+Target branch: ${BRANCH}
+Source: upstream/main -> origin/main
+
+Conflicted files:
+${conflict_files}
+
+Manual resolution steps:
+1. git fetch origin main && git fetch upstream main
+2. git switch -c ${BRANCH}-manual origin/main
+3. git merge upstream/main
+4. Resolve conflicts and commit
+5. git push -u origin ${BRANCH}-manual
+6. Open PR to main with labels: upstream-sync, needs-review
+EOF
+)
+            issue_title="Upstream sync conflict: ${DATE_UTC}"
+            existing_issue="$(gh issue list --state open --search "in:title ${issue_title}" --json number,title --jq '.[] | select(.title=="'"${issue_title}"'") | .number' | head -n 1 || true)"
+            if [ -n "$existing_issue" ]; then
+              gh issue comment "$existing_issue" --body "$conflict_body"
+            else
+              gh issue create --title "$issue_title" --body "$conflict_body" --label upstream-sync-conflict
+            fi
+            exit 1
+          fi
+
+      - name: Push sync branch
+        if: steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true'
+        run: |
+          git push -u origin "${{ steps.sync.outputs.branch }}"
+
+      - name: Open or update sync PR
+        if: steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true'
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.sync.outputs.branch }}"
+          DATE_UTC="${{ steps.sync.outputs.date_utc }}"
+          TITLE="chore(sync): upstream gastown ${DATE_UTC}"
+          BODY=$(cat <<EOF
+Automated weekly upstream sync from \`steveyegge/gastown\` into \`Narkowsky/codex-gas-town\`.
+
+- Source: \`upstream/main\`
+- Target: \`main\`
+- Sync branch: \`${BRANCH}\`
+
+Please review release-impacting changes before merge.
+EOF
+)
+
+          PR_NUMBER="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number' || true)"
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY" --add-label upstream-sync --add-label needs-review
+            echo "Updated existing PR #$PR_NUMBER"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY" --label upstream-sync --label needs-review
+            echo "Created new sync PR"
+          fi
