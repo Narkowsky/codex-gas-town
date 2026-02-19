@@ -53,9 +53,9 @@ jobs:
           echo "date_utc=${DATE_UTC}" >> "$GITHUB_OUTPUT"
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
 
-          if git diff --quiet origin/main..upstream/main; then
+          if git merge-base --is-ancestor upstream/main origin/main; then
             echo "no_sync=true" >> "$GITHUB_OUTPUT"
-            echo "No sync needed. upstream/main matches origin/main."
+            echo "No sync needed. upstream/main has no new commits beyond origin/main."
             exit 0
           fi
 
@@ -65,10 +65,16 @@ jobs:
           if git merge --no-ff --no-edit upstream/main; then
             echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
             echo "Merge from upstream/main succeeded."
+
+            if git diff --quiet origin/main..HEAD; then
+              echo "no_sync=true" >> "$GITHUB_OUTPUT"
+              echo "Merged cleanly but produced no content delta; skipping push/PR."
+              exit 0
+            fi
           else
             echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
             conflict_files="$(git diff --name-only --diff-filter=U | tr '\n' '\n')"
-            conflict_body=$(cat <<EOF
+            conflict_body=$(cat <<EOF2
 Automatic upstream sync encountered merge conflicts.
 
 Date: ${DATE_UTC}
@@ -85,7 +91,7 @@ Manual resolution steps:
 4. Resolve conflicts and commit
 5. git push -u origin ${BRANCH}-manual
 6. Open PR to main with labels: upstream-sync, needs-review
-EOF
+EOF2
 )
             issue_title="Upstream sync conflict: ${DATE_UTC}"
             existing_issue="$(gh issue list --state open --search "in:title ${issue_title}" --json number,title --jq '.[] | select(.title=="'"${issue_title}"'") | .number' | head -n 1 || true)"
@@ -109,7 +115,7 @@ EOF
           BRANCH="${{ steps.sync.outputs.branch }}"
           DATE_UTC="${{ steps.sync.outputs.date_utc }}"
           TITLE="chore(sync): upstream gastown ${DATE_UTC}"
-          BODY=$(cat <<EOF
+          BODY=$(cat <<EOF2
 Automated weekly upstream sync from \`steveyegge/gastown\` into \`Narkowsky/codex-gas-town\`.
 
 - Source: \`upstream/main\`
@@ -117,7 +123,7 @@ Automated weekly upstream sync from \`steveyegge/gastown\` into \`Narkowsky/code
 - Sync branch: \`${BRANCH}\`
 
 Please review release-impacting changes before merge.
-EOF
+EOF2
 )
 
           PR_NUMBER="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number' || true)"
