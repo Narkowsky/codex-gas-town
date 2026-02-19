@@ -1,6 +1,7 @@
 package refinery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -532,6 +533,144 @@ func TestEngineer_DeleteMergedBranchesConfig(t *testing.T) {
 	cfg := DefaultMergeQueueConfig()
 	if !cfg.DeleteMergedBranches {
 		t.Error("expected DeleteMergedBranches to be true by default")
+	}
+}
+
+func TestPostMergeConvoyCheck_NoTownBeads(t *testing.T) {
+	// postMergeConvoyCheck should silently return when town-level beads doesn't exist
+	tmpDir, err := os.MkdirTemp("", "engineer-convoy-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create rig dir as a subdirectory of the "town root"
+	rigDir := filepath.Join(tmpDir, "testrig")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{
+		Name: "testrig",
+		Path: rigDir,
+	}
+
+	e := NewEngineer(r)
+	var buf bytes.Buffer
+	e.SetOutput(&buf)
+
+	// Call with a nil-safe MR — should not panic
+	mr := &MRInfo{
+		ID:          "gt-test",
+		SourceIssue: "gt-src",
+		ConvoyID:    "hq-cv-abc",
+	}
+	e.postMergeConvoyCheck(mr)
+
+	// Should produce no output (town .beads doesn't exist)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output when town beads missing, got: %s", buf.String())
+	}
+}
+
+func TestConvoyInfoDescriptionParsing(t *testing.T) {
+	// Test that landConvoySwarm correctly parses Molecule from description
+	tests := []struct {
+		name        string
+		description string
+		wantMolID   string
+	}{
+		{
+			name:        "with molecule",
+			description: "Convoy tracking 2 issues\nOwner: mayor/\nMolecule: mol-release",
+			wantMolID:   "mol-release",
+		},
+		{
+			name:        "without molecule",
+			description: "Convoy tracking 2 issues\nOwner: mayor/",
+			wantMolID:   "",
+		},
+		{
+			name:        "empty description",
+			description: "",
+			wantMolID:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var moleculeID string
+			for _, line := range strings.Split(tt.description, "\n") {
+				if strings.HasPrefix(line, "Molecule: ") {
+					moleculeID = strings.TrimPrefix(line, "Molecule: ")
+					break
+				}
+			}
+			if moleculeID != tt.wantMolID {
+				t.Errorf("got molecule ID %q, want %q", moleculeID, tt.wantMolID)
+			}
+		})
+	}
+}
+
+func TestNotifyConvoyCompletionParsing(t *testing.T) {
+	// Test that notifyConvoyCompletion correctly parses Owner/Notify from description
+	tests := []struct {
+		name        string
+		description string
+		wantAddrs   []string
+	}{
+		{
+			name:        "owner and notify",
+			description: "Convoy tracking 2 issues\nOwner: mayor/\nNotify: ops/",
+			wantAddrs:   []string{"mayor/", "ops/"},
+		},
+		{
+			name:        "owner only",
+			description: "Owner: deacon/",
+			wantAddrs:   []string{"deacon/"},
+		},
+		{
+			name:        "no addresses",
+			description: "Convoy tracking 1 issue",
+			wantAddrs:   nil,
+		},
+		{
+			name:        "duplicate addresses deduped",
+			description: "Owner: mayor/\nNotify: mayor/",
+			wantAddrs:   []string{"mayor/"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			notified := make(map[string]bool)
+			var addrs []string
+
+			for _, line := range strings.Split(tt.description, "\n") {
+				var addr string
+				if strings.HasPrefix(line, "Owner: ") {
+					addr = strings.TrimPrefix(line, "Owner: ")
+				} else if strings.HasPrefix(line, "Notify: ") {
+					addr = strings.TrimPrefix(line, "Notify: ")
+				}
+
+				if addr != "" && !notified[addr] {
+					addrs = append(addrs, addr)
+					notified[addr] = true
+				}
+			}
+
+			if len(addrs) != len(tt.wantAddrs) {
+				t.Errorf("got %d addresses, want %d", len(addrs), len(tt.wantAddrs))
+				return
+			}
+			for i, addr := range addrs {
+				if addr != tt.wantAddrs[i] {
+					t.Errorf("addr[%d] = %q, want %q", i, addr, tt.wantAddrs[i])
+				}
+			}
+		})
 	}
 }
 

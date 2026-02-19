@@ -923,7 +923,12 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		}
 	}
 
-	// 3. Log success
+	// 3. Check and auto-close completed convoys
+	// After closing a source issue, its parent convoy may now be complete.
+	// Run convoy check to auto-close and notify subscribers.
+	e.postMergeConvoyCheck(mr)
+
+	// 4. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
 }
 
@@ -1423,4 +1428,242 @@ func (e *Engineer) ReleaseMR(mrID string) error {
 	return e.beads.Update(mrID, beads.UpdateOptions{
 		Assignee: &empty,
 	})
+}
+
+// postMergeConvoyCheck runs convoy completion checks after a successful merge.
+//
+// When a source issue is closed by a merge, any convoy tracking that issue may
+// now be complete (all tracked issues closed). This method:
+//  1. Runs `gt convoy check` to auto-close completed convoys and notify subscribers
+//  2. For completed convoys with integration branches (swarms), triggers landing
+//  3. Cleans up stale polecat branches from completed work
+//
+// All operations are best-effort: failures are logged but don't affect merge success.
+func (e *Engineer) postMergeConvoyCheck(mr *MRInfo) {
+	// Find town root from rig path (rig is at ~/gt/<rigname>, town is ~/gt)
+	townRoot := filepath.Dir(e.rig.Path)
+	townBeads := filepath.Join(townRoot, ".beads")
+
+	// Quick check: does town-level beads exist?
+	if _, err := os.Stat(townBeads); os.IsNotExist(err) {
+		return
+	}
+
+	// Step 1: Run `gt convoy check` to auto-close completed convoys.
+	// This handles cross-rig convoy completion: convoys in town beads (hq-*)
+	// tracking issues in rig beads (gt-*) won't auto-close via bd close alone.
+	closedConvoys := e.checkAndCloseCompletedConvoys(townRoot, townBeads)
+
+	// Step 2: For each closed convoy, check if it has a swarm with an
+	// integration branch that needs landing.
+	for _, convoy := range closedConvoys {
+		e.landConvoySwarm(townRoot, convoy)
+	}
+
+	// Step 3: Clean up stale branches from completed work.
+	// Prune remote tracking refs that no longer exist on origin.
+	if e.config.DeleteMergedBranches {
+		e.pruneStaleRemoteRefs()
+	}
+}
+
+// convoyInfo holds minimal info about a closed convoy for post-merge processing.
+type convoyInfo struct {
+	ID          string
+	Title       string
+	Description string
+}
+
+// checkAndCloseCompletedConvoys finds and closes convoys where all tracked issues
+// are complete. Returns the list of convoys that were closed.
+func (e *Engineer) checkAndCloseCompletedConvoys(townRoot, townBeads string) []convoyInfo {
+	// List all open convoys
+	listCmd := exec.Command("bd", "list", "--type=convoy", "--status=open", "--json")
+	listCmd.Dir = townBeads
+	var stdout bytes.Buffer
+	listCmd.Stdout = &stdout
+
+	if err := listCmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to list convoys: %v\n", err)
+		return nil
+	}
+
+	var convoys []struct {
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		Status      string `json:"status"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &convoys); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to parse convoy list: %v\n", err)
+		return nil
+	}
+
+	var closed []convoyInfo
+
+	for _, convoy := range convoys {
+		// Get tracked issues for this convoy via bd dep list
+		depCmd := exec.Command("bd", "dep", "list", convoy.ID, "--direction=down", "--type=tracks", "--json")
+		depCmd.Dir = townRoot
+		var depOut bytes.Buffer
+		depCmd.Stdout = &depOut
+
+		if err := depCmd.Run(); err != nil {
+			continue
+		}
+
+		var deps []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(depOut.Bytes(), &deps); err != nil {
+			continue
+		}
+
+		// Refresh statuses from home rigs (cross-rig lookup)
+		allClosed := true
+		for _, dep := range deps {
+			// Unwrap external:prefix:id format
+			depID := dep.ID
+			if strings.HasPrefix(depID, "external:") {
+				parts := strings.SplitN(depID, ":", 3)
+				if len(parts) == 3 {
+					depID = parts[2]
+				}
+			}
+
+			// Get fresh status from home rig via bd show with routing
+			showCmd := exec.Command("bd", "show", depID, "--json")
+			showCmd.Dir = townRoot
+			var showOut bytes.Buffer
+			showCmd.Stdout = &showOut
+
+			if err := showCmd.Run(); err != nil || showOut.Len() == 0 {
+				// Can't verify - treat as open to be safe
+				allClosed = false
+				break
+			}
+
+			var issues []struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(showOut.Bytes(), &issues); err != nil || len(issues) == 0 {
+				allClosed = false
+				break
+			}
+
+			if issues[0].Status != "closed" && issues[0].Status != "tombstone" {
+				allClosed = false
+				break
+			}
+		}
+
+		if !allClosed {
+			continue
+		}
+
+		// All tracked issues are complete - close the convoy
+		reason := "All tracked issues completed"
+		if len(deps) == 0 {
+			reason = "Empty convoy — auto-closed as definitionally complete"
+		}
+
+		closeCmd := exec.Command("bd", "close", convoy.ID, "-r", reason)
+		closeCmd.Dir = townBeads
+
+		if err := closeCmd.Run(); err != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close convoy %s: %v\n", convoy.ID, err)
+			continue
+		}
+
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Auto-closed convoy %s: %s\n", convoy.ID, convoy.Title)
+		closed = append(closed, convoyInfo{
+			ID:          convoy.ID,
+			Title:       convoy.Title,
+			Description: convoy.Description,
+		})
+
+		// Send convoy completion notifications (owner + notify addresses)
+		e.notifyConvoyCompletion(townRoot, convoy.ID, convoy.Title, convoy.Description)
+	}
+
+	return closed
+}
+
+// notifyConvoyCompletion sends notifications to convoy owner and notify addresses.
+func (e *Engineer) notifyConvoyCompletion(townRoot, convoyID, title, description string) {
+	notified := make(map[string]bool)
+
+	for _, line := range strings.Split(description, "\n") {
+		var addr string
+		if strings.HasPrefix(line, "Owner: ") {
+			addr = strings.TrimPrefix(line, "Owner: ")
+		} else if strings.HasPrefix(line, "Notify: ") {
+			addr = strings.TrimPrefix(line, "Notify: ")
+		}
+
+		if addr != "" && !notified[addr] {
+			mailCmd := exec.Command("gt", "mail", "send", addr,
+				"-s", fmt.Sprintf("🚚 Convoy landed: %s", title),
+				"-m", fmt.Sprintf("Convoy %s has completed.\n\nAll tracked issues are now closed.\n\nClosed by: %s/refinery", convoyID, e.rig.Name))
+			mailCmd.Dir = townRoot
+			if err := mailCmd.Run(); err != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not notify %s: %v\n", addr, err)
+			}
+			notified[addr] = true
+		}
+	}
+}
+
+// landConvoySwarm checks if a completed convoy has an associated swarm with an
+// integration branch, and triggers landing if so.
+func (e *Engineer) landConvoySwarm(townRoot string, convoy convoyInfo) {
+	// Check if convoy description mentions a molecule/swarm
+	var moleculeID string
+	for _, line := range strings.Split(convoy.Description, "\n") {
+		if strings.HasPrefix(line, "Molecule: ") {
+			moleculeID = strings.TrimPrefix(line, "Molecule: ")
+			break
+		}
+	}
+
+	if moleculeID == "" {
+		return // No swarm/molecule associated with this convoy
+	}
+
+	// Check if the molecule has an integration branch (swarm/* pattern)
+	integrationBranch := fmt.Sprintf("swarm/%s", moleculeID)
+	branchExists, err := e.git.BranchExists(integrationBranch)
+	if err != nil || !branchExists {
+		// Also check remote
+		remoteExists, _ := e.git.RemoteTrackingBranchExists("origin", integrationBranch)
+		if !remoteExists {
+			return // No integration branch to land
+		}
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Landing integration branch %s for convoy %s...\n", integrationBranch, convoy.ID)
+
+	// Use gt swarm land to perform the landing
+	landCmd := exec.Command("gt", "swarm", "land", moleculeID)
+	landCmd.Dir = townRoot
+	var landOut, landErr bytes.Buffer
+	landCmd.Stdout = &landOut
+	landCmd.Stderr = &landErr
+
+	if err := landCmd.Run(); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to land swarm %s: %v (%s)\n",
+			moleculeID, err, strings.TrimSpace(landErr.String()))
+		return
+	}
+
+	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Landed integration branch for convoy %s\n", convoy.ID)
+}
+
+// pruneStaleRemoteRefs prunes remote tracking refs that no longer exist on origin.
+// This cleans up refs from branches that were deleted on the remote after merge.
+func (e *Engineer) pruneStaleRemoteRefs() {
+	if err := e.git.FetchPrune("origin"); err != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to prune stale remote refs: %v\n", err)
+	}
 }
