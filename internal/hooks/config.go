@@ -198,7 +198,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 // the base config and applying all applicable overrides in order of specificity.
 // If no base config exists, uses DefaultBase().
 //
-// For each override key, built-in defaults (from DefaultOverrides, currently empty)
+// For each override key, built-in defaults (from DefaultOverrides)
 // are merged first, then on-disk overrides layer on top. On-disk overrides can
 // replace or extend base hooks by providing matching PreToolUse entries.
 func ComputeExpected(target string) (*HooksConfig, error) {
