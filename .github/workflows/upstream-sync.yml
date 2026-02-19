@@ -73,26 +73,22 @@ jobs:
             fi
           else
             echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
-            conflict_files="$(git diff --name-only --diff-filter=U | tr '\n' '\n')"
-            conflict_body=$(cat <<EOF2
-Automatic upstream sync encountered merge conflicts.
+            conflict_files="$(git diff --name-only --diff-filter=U || true)"
+            conflict_body="$(printf '%s\n\n%s\n%s\n%s\n\n%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+              "Automatic upstream sync encountered merge conflicts." \
+              "Date: ${DATE_UTC}" \
+              "Target branch: ${BRANCH}" \
+              "Source: upstream/main -> origin/main" \
+              "Conflicted files:" \
+              "${conflict_files}" \
+              "Manual resolution steps:" \
+              "1. git fetch origin main && git fetch upstream main" \
+              "2. git switch -c ${BRANCH}-manual origin/main" \
+              "3. git merge upstream/main" \
+              "4. Resolve conflicts and commit" \
+              "5. git push -u origin ${BRANCH}-manual" \
+            )"
 
-Date: ${DATE_UTC}
-Target branch: ${BRANCH}
-Source: upstream/main -> origin/main
-
-Conflicted files:
-${conflict_files}
-
-Manual resolution steps:
-1. git fetch origin main && git fetch upstream main
-2. git switch -c ${BRANCH}-manual origin/main
-3. git merge upstream/main
-4. Resolve conflicts and commit
-5. git push -u origin ${BRANCH}-manual
-6. Open PR to main with labels: upstream-sync, needs-review
-EOF2
-)
             issue_title="Upstream sync conflict: ${DATE_UTC}"
             existing_issue="$(gh issue list --state open --search "in:title ${issue_title}" --json number,title --jq '.[] | select(.title=="'"${issue_title}"'") | .number' | head -n 1 || true)"
             if [ -n "$existing_issue" ]; then
@@ -115,16 +111,13 @@ EOF2
           BRANCH="${{ steps.sync.outputs.branch }}"
           DATE_UTC="${{ steps.sync.outputs.date_utc }}"
           TITLE="chore(sync): upstream gastown ${DATE_UTC}"
-          BODY=$(cat <<EOF2
-Automated weekly upstream sync from \`steveyegge/gastown\` into \`Narkowsky/codex-gas-town\`.
-
-- Source: \`upstream/main\`
-- Target: \`main\`
-- Sync branch: \`${BRANCH}\`
-
-Please review release-impacting changes before merge.
-EOF2
-)
+          BODY="$(printf '%s\n\n%s\n%s\n%s\n\n%s\n' \
+            "Automated weekly upstream sync from steveyegge/gastown into Narkowsky/codex-gas-town." \
+            "- Source: upstream/main" \
+            "- Target: main" \
+            "- Sync branch: ${BRANCH}" \
+            "Please review release-impacting changes before merge." \
+          )"
 
           PR_NUMBER="$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number' || true)"
           if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
