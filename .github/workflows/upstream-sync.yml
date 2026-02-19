@@ -1,7 +1,7 @@
 name: Upstream Sync
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
     - cron: '0 8 * * 1'
 
@@ -104,12 +104,12 @@ EOF2
           fi
 
       - name: Push sync branch
-        if: steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true'
+        if: ${{ steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true' }}
         run: |
           git push -u origin "${{ steps.sync.outputs.branch }}"
 
       - name: Open or update sync PR
-        if: steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true'
+        if: ${{ steps.sync.outputs.no_sync == 'false' && steps.sync.outputs.merge_conflict != 'true' }}
         run: |
           set -euo pipefail
           BRANCH="${{ steps.sync.outputs.branch }}"
