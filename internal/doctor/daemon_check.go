@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -46,7 +47,7 @@ func (c *DaemonCheck) Run(ctx *CheckContext) *CheckResult {
 			uptime := time.Since(state.StartedAt).Round(time.Second)
 			details = append(details, "Uptime: "+uptime.String())
 			if state.HeartbeatCount > 0 {
-				details = append(details, "Heartbeats: "+string(rune(state.HeartbeatCount)))
+				details = append(details, fmt.Sprintf("Heartbeats: %d", state.HeartbeatCount))
 			}
 		}
 

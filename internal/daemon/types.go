@@ -81,6 +81,30 @@ func LoadState(townRoot string) (*State, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
+
+	// Reconcile persisted state with runtime truth to avoid stale "running"
+	// indicators after crashes or abrupt shutdowns. PID lock/process checks are
+	// authoritative; state.json is informational.
+	reconciled := state
+	if running, pid, runErr := IsRunning(townRoot); runErr == nil {
+		reconciled.Running = running
+		if running {
+			reconciled.PID = pid
+		} else {
+			reconciled.PID = 0
+		}
+	} else if reconciled.Running {
+		// Any runtime check failure while state says running is treated as stale.
+		reconciled.Running = false
+		reconciled.PID = 0
+	}
+
+	if reconciled.Running != state.Running || reconciled.PID != state.PID {
+		state = reconciled
+		// Best-effort write back; callers still get the reconciled state.
+		_ = SaveState(townRoot, &state)
+	}
+
 	return &state, nil
 }
 

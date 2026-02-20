@@ -14,10 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/approvals"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/policy"
+	"github.com/steveyegge/gastown/internal/runlog"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
-
 
 // CommandRequest is the JSON request body for /api/run.
 type CommandRequest struct {
@@ -30,11 +33,16 @@ type CommandRequest struct {
 
 // CommandResponse is the JSON response from /api/run.
 type CommandResponse struct {
-	Success    bool   `json:"success"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
-	DurationMs int64  `json:"duration_ms"`
-	Command    string `json:"command"`
+	Success          bool   `json:"success"`
+	Output           string `json:"output,omitempty"`
+	Error            string `json:"error,omitempty"`
+	DurationMs       int64  `json:"duration_ms"`
+	Command          string `json:"command"`
+	RunID            string `json:"run_id,omitempty"`
+	PolicyDecision   string `json:"policy_decision,omitempty"`
+	RiskClass        string `json:"risk_class,omitempty"`
+	ApprovalRequired bool   `json:"approval_required,omitempty"`
+	ApprovalID       string `json:"approval_id,omitempty"`
 }
 
 // CommandListResponse is the JSON response from /api/commands.
@@ -48,6 +56,8 @@ type APIHandler struct {
 	gtPath string
 	// workDir is the working directory for command execution.
 	workDir string
+	// townRoot is the workspace root (if detected).
+	townRoot string
 	// Configurable timeouts (from TownSettings.WebTimeouts)
 	defaultRunTimeout time.Duration
 	maxRunTimeout     time.Duration
@@ -57,6 +67,14 @@ type APIHandler struct {
 	optionsCacheMu   sync.RWMutex
 	// cmdSem limits concurrent command executions to prevent resource exhaustion.
 	cmdSem chan struct{}
+	// policyEvaluator classifies/decides command execution policy.
+	policyEvaluator *policy.Evaluator
+	// approvalStore persists command approval requests.
+	approvalStore *approvals.Store
+	// runLog stores append-only command execution audit events.
+	runLog *runlog.Store
+	// dashboardToken optionally enforces API auth for mutating endpoints.
+	dashboardToken string
 }
 
 const optionsCacheTTL = 30 * time.Second
@@ -70,31 +88,70 @@ func NewAPIHandler(defaultRunTimeout, maxRunTimeout time.Duration) *APIHandler {
 	// Use PATH lookup for gt binary. Do NOT use os.Executable() here - during
 	// tests it returns the test binary, causing fork bombs when executed.
 	workDir, _ := os.Getwd()
+	townRoot, _ := workspace.Find(workDir)
+
+	evaluator := policy.NewDefaultEvaluator()
+	var approvalStore *approvals.Store
+	var runStore *runlog.Store
+	if townRoot != "" {
+		evaluator = policy.LoadOrDefault(townRoot)
+		approvalStore = approvals.NewStore(townRoot)
+		runStore = runlog.NewStore(townRoot)
+	}
+
 	return &APIHandler{
 		gtPath:            "gt",
 		workDir:           workDir,
+		townRoot:          townRoot,
 		defaultRunTimeout: defaultRunTimeout,
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
+		policyEvaluator:   evaluator,
+		approvalStore:     approvalStore,
+		runLog:            runStore,
+		dashboardToken:    dashboardToken(),
 	}
 }
 
 // ServeHTTP routes API requests to the appropriate handler.
 func (h *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Set CORS headers for dashboard
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if !applyLocalCORS(w, r) {
+		h.sendError(w, "Origin not allowed", http.StatusForbidden)
+		return
+	}
 
 	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	path := strings.TrimPrefix(r.URL.Path, "/api")
+	if h.requiresDashboardToken(path, r.Method) && !requestHasDashboardToken(r, h.dashboardToken) {
+		h.sendError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	switch {
 	case path == "/run" && r.Method == http.MethodPost:
 		h.handleRun(w, r)
+	case path == "/v1/policy/evaluate" && r.Method == http.MethodPost:
+		h.handlePolicyEvaluate(w, r)
+	case path == "/v1/approvals" && r.Method == http.MethodPost:
+		h.handleApprovalCreate(w, r)
+	case path == "/v1/approvals" && r.Method == http.MethodGet:
+		h.handleApprovalList(w, r)
+	case strings.HasPrefix(path, "/v1/approvals/") && r.Method == http.MethodPost:
+		if approvalID, ok := parseApprovalDecisionPath(path); ok {
+			h.handleApprovalDecision(w, r, approvalID)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
+	case strings.HasPrefix(path, "/v1/runs/") && r.Method == http.MethodGet:
+		if runID, ok := parseRunAuditPath(path); ok {
+			h.handleRunAudit(w, runID)
+			return
+		}
+		http.Error(w, "Not found", http.StatusNotFound)
 	case path == "/commands" && r.Method == http.MethodGet:
 		h.handleCommands(w, r)
 	case path == "/options" && r.Method == http.MethodGet:
@@ -163,6 +220,101 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Sanitize args
 	args = SanitizeArgs(args)
+	if len(args) == 0 {
+		h.sendError(w, "Empty command after sanitization", http.StatusBadRequest)
+		return
+	}
+
+	// Evaluate policy decision for this command before execution.
+	eval := h.policyEvaluator.Evaluate(policy.EvalRequest{
+		Agent:       "dashboard",
+		Repo:        policy.NormalizeRepo(h.workDir),
+		Command:     strings.Join(args, " "),
+		Args:        args,
+		RequestedBy: "dashboard",
+		Timestamp:   time.Now().UTC(),
+	})
+
+	runID := runlog.NewRunID()
+	if h.runLog != nil {
+		_ = h.runLog.Append(runlog.Event{
+			RunID:          runID,
+			AgentID:        "dashboard",
+			EventType:      "policy_evaluated",
+			State:          "queued",
+			PolicyDecision: string(eval.Decision),
+			Payload: map[string]interface{}{
+				"command":        strings.Join(args, " "),
+				"class":          eval.Class,
+				"requested_by":   "dashboard",
+				"whitelist_safe": meta.Safe,
+			},
+		})
+	}
+
+	if eval.Decision == policy.DecisionDeny {
+		resp := CommandResponse{
+			Success:        false,
+			Command:        req.Command,
+			Error:          "Command denied by policy: " + eval.Reason,
+			PolicyDecision: string(eval.Decision),
+			RiskClass:      string(eval.Class),
+			RunID:          runID,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if eval.Decision == policy.DecisionRequireApproval {
+		if h.approvalStore == nil {
+			h.sendError(w, "Approvals are unavailable outside a workspace", http.StatusServiceUnavailable)
+			return
+		}
+		approvalReq, err := h.approvalStore.Create(approvals.CreateInput{
+			RunID:          runID,
+			Command:        strings.Join(args, " "),
+			Class:          eval.Class,
+			RequestedBy:    "dashboard",
+			Repo:           policy.NormalizeRepo(h.workDir),
+			PolicyDecision: eval.Decision,
+			Reason:         eval.Reason,
+			TTL:            15 * time.Minute,
+		})
+		if err != nil {
+			h.sendError(w, "Failed to create approval request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if h.runLog != nil {
+			_ = h.runLog.Append(runlog.Event{
+				RunID:          runID,
+				AgentID:        "dashboard",
+				EventType:      "approval_requested",
+				State:          "awaiting_approval",
+				PolicyDecision: string(eval.Decision),
+				Payload: map[string]interface{}{
+					"approval_id": approvalReq.ID,
+					"class":       eval.Class,
+				},
+			})
+		}
+
+		resp := CommandResponse{
+			Success:          false,
+			Command:          req.Command,
+			Error:            "Approval required before command execution",
+			PolicyDecision:   string(eval.Decision),
+			RiskClass:        string(eval.Class),
+			ApprovalRequired: true,
+			ApprovalID:       approvalReq.ID,
+			RunID:            runID,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
 
 	// Execute command
 	start := time.Now()
@@ -170,8 +322,11 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(start)
 
 	resp := CommandResponse{
-		Command:    req.Command,
-		DurationMs: duration.Milliseconds(),
+		Command:        req.Command,
+		DurationMs:     duration.Milliseconds(),
+		RunID:          runID,
+		RiskClass:      string(eval.Class),
+		PolicyDecision: string(eval.Decision),
 	}
 
 	if err != nil {
@@ -187,6 +342,26 @@ func (h *APIHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !meta.Safe || !resp.Success {
 		// Could add structured logging here
 		_ = meta // silence unused warning for now
+	}
+	if h.runLog != nil {
+		runState := "failed"
+		if resp.Success {
+			runState = "completed"
+		}
+		_ = h.runLog.Append(runlog.Event{
+			RunID:          runID,
+			AgentID:        "dashboard",
+			EventType:      "command_completed",
+			State:          runState,
+			PolicyDecision: string(eval.Decision),
+			Payload: map[string]interface{}{
+				"command":     strings.Join(args, " "),
+				"success":     resp.Success,
+				"duration_ms": resp.DurationMs,
+				"error":       resp.Error,
+				"output":      output,
+			},
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -257,6 +432,22 @@ func (h *APIHandler) sendError(w http.ResponseWriter, message string, status int
 		Success: false,
 		Error:   message,
 	})
+}
+
+func (h *APIHandler) requiresDashboardToken(path, method string) bool {
+	// Keep read endpoints open by default, but require token for mutations
+	// when GT_DASHBOARD_TOKEN is configured.
+	if h.dashboardToken == "" {
+		return false
+	}
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+		return false
+	}
+	// Explicitly require token for all POST API calls.
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+	return true
 }
 
 // MailMessage represents a mail message for the API.
@@ -1574,10 +1765,10 @@ func parsePRShowOutput(jsonStr string) PRShowResponse {
 	}
 
 	var data struct {
-		Number       int    `json:"number"`
-		Title        string `json:"title"`
-		State        string `json:"state"`
-		Author       struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		State  string `json:"state"`
+		Author struct {
 			Login string `json:"login"`
 		} `json:"author"`
 		URL          string `json:"url"`
@@ -1643,18 +1834,18 @@ func parsePRShowOutput(jsonStr string) PRShowResponse {
 type CrewMember struct {
 	Name       string `json:"name"`
 	Rig        string `json:"rig"`
-	State      string `json:"state"`       // spinning, finished, ready, questions
+	State      string `json:"state"` // spinning, finished, ready, questions
 	Hook       string `json:"hook,omitempty"`
 	HookTitle  string `json:"hook_title,omitempty"`
-	Session    string `json:"session"`     // attached, detached, none
+	Session    string `json:"session"` // attached, detached, none
 	LastActive string `json:"last_active"`
 }
 
 // CrewResponse is the response for /api/crew.
 type CrewResponse struct {
-	Crew    []CrewMember `json:"crew"`
-	ByRig   map[string][]CrewMember `json:"by_rig"`
-	Total   int          `json:"total"`
+	Crew  []CrewMember            `json:"crew"`
+	ByRig map[string][]CrewMember `json:"by_rig"`
+	Total int                     `json:"total"`
 }
 
 // ReadyItem represents a ready work item.
@@ -1668,9 +1859,9 @@ type ReadyItem struct {
 
 // ReadyResponse is the response for /api/ready.
 type ReadyResponse struct {
-	Items   []ReadyItem         `json:"items"`
+	Items    []ReadyItem            `json:"items"`
 	BySource map[string][]ReadyItem `json:"by_source"`
-	Summary struct {
+	Summary  struct {
 		Total   int `json:"total"`
 		P1Count int `json:"p1_count"`
 		P2Count int `json:"p2_count"`
@@ -1685,7 +1876,7 @@ func (h *APIHandler) handleCrew(w http.ResponseWriter, r *http.Request) {
 
 	// Run gt crew list --all --json to get crew across all rigs
 	output, err := h.runGtCommand(ctx, 10*time.Second, []string{"crew", "list", "--all", "--json"})
-	
+
 	resp := CrewResponse{
 		Crew:  make([]CrewMember, 0),
 		ByRig: make(map[string][]CrewMember),
@@ -1705,7 +1896,7 @@ func (h *APIHandler) handleCrew(w http.ResponseWriter, r *http.Request) {
 		Session string `json:"session,omitempty"`
 		Hook    string `json:"hook,omitempty"`
 	}
-	
+
 	if err := json.Unmarshal([]byte(output), &crewData); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -1807,9 +1998,9 @@ func (h *APIHandler) isClaudeRunningInSession(ctx context.Context, sessionName s
 	}
 	// Check for common agent commands
 	return strings.Contains(output, "claude") ||
-	       strings.Contains(output, "node") ||
-	       strings.Contains(output, "codex") ||
-	       strings.Contains(output, "opencode")
+		strings.Contains(output, "node") ||
+		strings.Contains(output, "codex") ||
+		strings.Contains(output, "opencode")
 }
 
 // hasQuestionInPane checks the last output for question indicators.
@@ -1880,7 +2071,7 @@ func (h *APIHandler) handleReady(w http.ResponseWriter, r *http.Request) {
 
 	// Run gt ready --json to get ready work
 	output, err := h.runGtCommand(ctx, 12*time.Second, []string{"ready", "--json"})
-	
+
 	resp := ReadyResponse{
 		Items:    make([]ReadyItem, 0),
 		BySource: make(map[string][]ReadyItem),
@@ -2051,7 +2242,10 @@ func (h *APIHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if !applyLocalCORS(w, r) {
+		http.Error(w, "Origin not allowed", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	ctx := r.Context()

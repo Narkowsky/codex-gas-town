@@ -38,12 +38,13 @@ func NewSetupAPIHandler() *SetupAPIHandler {
 
 // ServeHTTP routes setup API requests.
 func (h *SetupAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	if !applyLocalCORS(w, r) {
+		h.sendError(w, "Origin not allowed", http.StatusForbidden)
+		return
+	}
 
 	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 

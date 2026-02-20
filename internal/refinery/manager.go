@@ -17,8 +17,8 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -183,6 +183,13 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Add refinery-specific flag
 	envVars["GT_REFINERY"] = "1"
+	// Ensure GT_AGENT is in tmux session env for reliable liveness detection.
+	// Process-level exports are not visible to tmux GetEnvironment.
+	if agentOverride != "" {
+		envVars["GT_AGENT"] = agentOverride
+	} else if runtimeConfig.ResolvedAgent != "" {
+		envVars["GT_AGENT"] = runtimeConfig.ResolvedAgent
+	}
 
 	// Set all env vars in tmux session (for debugging) and they'll also be exported to Claude
 	for k, v := range envVars {

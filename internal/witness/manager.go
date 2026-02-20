@@ -11,9 +11,9 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -176,6 +176,14 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		Rig:      m.rig.Name,
 		TownRoot: townRoot,
 	})
+	// Ensure GT_AGENT is in tmux session env for reliable liveness detection.
+	// BuildStartupCommand exports GT_AGENT in process env, but tmux environment
+	// queries (used by IsAgentAlive/status) only see tmux session variables.
+	if agentOverride != "" {
+		envVars["GT_AGENT"] = agentOverride
+	} else if runtimeConfig != nil && runtimeConfig.ResolvedAgent != "" {
+		envVars["GT_AGENT"] = runtimeConfig.ResolvedAgent
+	}
 	for k, v := range envVars {
 		_ = t.SetEnvironment(sessionID, k, v)
 	}

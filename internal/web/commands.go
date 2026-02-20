@@ -26,22 +26,26 @@ type CommandMeta struct {
 // Commands not in this list are blocked for security.
 var AllowedCommands = map[string]CommandMeta{
 	// === Read-only commands (always safe) ===
-	"status":      {Safe: true, Desc: "Show town status", Category: "Status"},
-	"agents list": {Safe: true, Desc: "List active agents", Category: "Status"},
-	"convoy list": {Safe: true, Desc: "List convoys", Category: "Convoys"},
-	"convoy show":   {Safe: true, Desc: "Show convoy details", Category: "Convoys", Args: "<convoy-id>", ArgType: "convoys"},
-	"convoy status": {Safe: true, Desc: "Show convoy status with tracked issues", Category: "Convoys", Args: "<convoy-id> --json", ArgType: "convoys"},
-	"mail inbox":  {Safe: true, Desc: "Check inbox", Category: "Mail"},
-	"mail check":  {Safe: true, Desc: "Check for new mail", Category: "Mail"},
-	"mail peek":   {Safe: true, Desc: "Peek at message", Category: "Mail", Args: "<message-id>"},
-	"rig list":    {Safe: true, Desc: "List rigs", Category: "Rigs"},
-	"rig show":    {Safe: true, Desc: "Show rig details", Category: "Rigs", Args: "<rig-name>", ArgType: "rigs"},
-	"doctor":      {Safe: true, Desc: "Health check", Category: "Diagnostics"},
-	"hooks list":  {Safe: true, Desc: "List hooks", Category: "Hooks"},
-	"activity":    {Safe: true, Desc: "Show recent activity", Category: "Status"},
-	"info":        {Safe: true, Desc: "Show workspace info", Category: "Status"},
-	"log":         {Safe: true, Desc: "View logs", Category: "Diagnostics"},
-	"audit":       {Safe: true, Desc: "View audit log", Category: "Diagnostics"},
+	"status":         {Safe: true, Desc: "Show town status", Category: "Status"},
+	"agents list":    {Safe: true, Desc: "List active agents", Category: "Status"},
+	"convoy list":    {Safe: true, Desc: "List convoys", Category: "Convoys"},
+	"convoy show":    {Safe: true, Desc: "Show convoy details", Category: "Convoys", Args: "<convoy-id>", ArgType: "convoys"},
+	"convoy status":  {Safe: true, Desc: "Show convoy status with tracked issues", Category: "Convoys", Args: "<convoy-id> --json", ArgType: "convoys"},
+	"mail inbox":     {Safe: true, Desc: "Check inbox", Category: "Mail"},
+	"mail check":     {Safe: true, Desc: "Check for new mail", Category: "Mail"},
+	"mail peek":      {Safe: true, Desc: "Peek at message", Category: "Mail", Args: "<message-id>"},
+	"rig list":       {Safe: true, Desc: "List rigs", Category: "Rigs"},
+	"rig show":       {Safe: true, Desc: "Show rig details", Category: "Rigs", Args: "<rig-name>", ArgType: "rigs"},
+	"doctor":         {Safe: true, Desc: "Health check", Category: "Diagnostics"},
+	"hooks list":     {Safe: true, Desc: "List hooks", Category: "Hooks"},
+	"activity":       {Safe: true, Desc: "Show recent activity", Category: "Status"},
+	"info":           {Safe: true, Desc: "Show workspace info", Category: "Status"},
+	"log":            {Safe: true, Desc: "View logs", Category: "Diagnostics"},
+	"audit":          {Safe: true, Desc: "View audit log", Category: "Diagnostics"},
+	"approvals list": {Safe: true, Desc: "List approval requests", Category: "Governance"},
+	"approvals show": {Safe: true, Desc: "Show approval details", Category: "Governance", Args: "<approval-id>"},
+	"policy eval":    {Safe: true, Desc: "Evaluate command policy", Category: "Governance", Args: "--cmd <command>"},
+	"runs replay":    {Safe: true, Desc: "Replay run audit log", Category: "Governance", Args: "--run-id <run-id>"},
 
 	// Polecat read-only
 	"polecat list --all": {Safe: true, Desc: "List all polecats", Category: "Polecats"},
@@ -90,8 +94,10 @@ var AllowedCommands = map[string]CommandMeta{
 	"hook detach": {Confirm: true, Desc: "Detach hook", Category: "Hooks", Args: "<bead>", ArgType: "hooks"},
 
 	// Notifications
-	"notify":    {Confirm: true, Desc: "Send notification", Category: "Notifications", Args: "<message>"},
-	"broadcast": {Confirm: true, Desc: "Broadcast message", Category: "Notifications", Args: "<message>"},
+	"notify":            {Confirm: true, Desc: "Send notification", Category: "Notifications", Args: "<message>"},
+	"broadcast":         {Confirm: true, Desc: "Broadcast message", Category: "Notifications", Args: "<message>"},
+	"approvals approve": {Confirm: true, Desc: "Approve a pending request", Category: "Governance", Args: "<approval-id> --reason <why>"},
+	"approvals deny":    {Confirm: true, Desc: "Deny a pending request", Category: "Governance", Args: "<approval-id> --reason <why>"},
 }
 
 // BlockedPatterns are regex patterns for commands that should never run from the dashboard.

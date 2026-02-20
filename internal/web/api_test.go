@@ -6,11 +6,37 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/approvals"
+	"github.com/steveyegge/gastown/internal/policy"
+	"github.com/steveyegge/gastown/internal/runlog"
 )
+
+func newGovernedTestHandler(t *testing.T) *APIHandler {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	// Minimal town marker for workspace-aware code paths.
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":1,"name":"test-town"}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+
+	h := NewAPIHandler(30*time.Second, 60*time.Second)
+	h.workDir = townRoot
+	h.townRoot = townRoot
+	h.policyEvaluator = policy.NewDefaultEvaluator()
+	h.approvalStore = approvals.NewStore(townRoot)
+	h.runLog = runlog.NewStore(townRoot)
+	return h
+}
 
 func TestValidateCommand(t *testing.T) {
 	tests := []struct {
@@ -344,6 +370,139 @@ func TestAPIHandler_Run_EmptyCommand(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Errorf("POST /api/run empty command status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+func TestAPIHandler_Run_RequiresApproval(t *testing.T) {
+	handler := newGovernedTestHandler(t)
+	handler.gtPath = "echo" // Should not execute for approval-required commands
+
+	body := `{"command":"rig boot testrig"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
+	}
+
+	var resp CommandResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.ApprovalRequired {
+		t.Fatalf("approval_required = false, want true")
+	}
+	if resp.ApprovalID == "" {
+		t.Fatalf("missing approval ID")
+	}
+	if resp.PolicyDecision != string(policy.DecisionRequireApproval) {
+		t.Fatalf("policy decision = %q, want %q", resp.PolicyDecision, policy.DecisionRequireApproval)
+	}
+}
+
+func TestAPIHandler_V1PolicyEvaluate(t *testing.T) {
+	handler := newGovernedTestHandler(t)
+
+	body := `{"agent":"dashboard","command":"rig boot testrig"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/policy/evaluate", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp policyEvaluateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Decision != string(policy.DecisionRequireApproval) {
+		t.Fatalf("decision = %q, want %q", resp.Decision, policy.DecisionRequireApproval)
+	}
+}
+
+func TestAPIHandler_V1ApprovalsLifecycle(t *testing.T) {
+	handler := newGovernedTestHandler(t)
+
+	createBody := `{"command":"rig boot testrig","requested_by":"dashboard"}`
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/approvals", bytes.NewBufferString(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createResp := httptest.NewRecorder()
+	handler.ServeHTTP(createResp, createReq)
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", createResp.Code, http.StatusCreated)
+	}
+
+	var created approvals.Request
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("missing approval ID")
+	}
+	if created.Status != approvals.StatusPending {
+		t.Fatalf("status = %s, want pending", created.Status)
+	}
+
+	decisionBody := `{"decision":"approve","approver":"ops","rationale":"approved"}`
+	decisionReq := httptest.NewRequest(http.MethodPost, "/api/v1/approvals/"+created.ID+"/decision", bytes.NewBufferString(decisionBody))
+	decisionReq.Header.Set("Content-Type", "application/json")
+	decisionResp := httptest.NewRecorder()
+	handler.ServeHTTP(decisionResp, decisionReq)
+	if decisionResp.Code != http.StatusOK {
+		t.Fatalf("decision status = %d, want %d", decisionResp.Code, http.StatusOK)
+	}
+
+	var decided approvals.Request
+	if err := json.NewDecoder(decisionResp.Body).Decode(&decided); err != nil {
+		t.Fatalf("decode decision response: %v", err)
+	}
+	if decided.Status != approvals.StatusApproved {
+		t.Fatalf("status = %s, want approved", decided.Status)
+	}
+}
+
+func TestAPIHandler_V1RunAudit(t *testing.T) {
+	handler := newGovernedTestHandler(t)
+	handler.gtPath = "echo"
+
+	runReqBody := `{"command":"status"}`
+	runReq := httptest.NewRequest(http.MethodPost, "/api/run", bytes.NewBufferString(runReqBody))
+	runReq.Header.Set("Content-Type", "application/json")
+	runResp := httptest.NewRecorder()
+	handler.ServeHTTP(runResp, runReq)
+	if runResp.Code != http.StatusOK {
+		t.Fatalf("run status = %d, want %d", runResp.Code, http.StatusOK)
+	}
+
+	var runOut CommandResponse
+	if err := json.NewDecoder(runResp.Body).Decode(&runOut); err != nil {
+		t.Fatalf("decode run response: %v", err)
+	}
+	if runOut.RunID == "" {
+		t.Fatalf("expected run ID")
+	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runOut.RunID+"/audit", nil)
+	auditResp := httptest.NewRecorder()
+	handler.ServeHTTP(auditResp, auditReq)
+	if auditResp.Code != http.StatusOK {
+		t.Fatalf("audit status = %d, want %d", auditResp.Code, http.StatusOK)
+	}
+
+	var auditOut struct {
+		RunID  string         `json:"run_id"`
+		Events []runlog.Event `json:"events"`
+	}
+	if err := json.NewDecoder(auditResp.Body).Decode(&auditOut); err != nil {
+		t.Fatalf("decode audit response: %v", err)
+	}
+	if len(auditOut.Events) == 0 {
+		t.Fatalf("expected audit events")
 	}
 }
 
