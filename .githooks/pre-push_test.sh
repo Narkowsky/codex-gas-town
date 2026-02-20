@@ -10,25 +10,26 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOK="$SCRIPT_DIR/pre-push"
 PASS=0
 FAIL=0
-TMPDIR=""
+WORK_TMPDIR=""
 DEFAULT_BRANCH=""
+MKTEMP_PARENT="${TEST_TMPDIR:-${TMPDIR:-/tmp}}"
 
 cleanup() {
   cd /tmp  # Ensure CWD exists before removing TMPDIR
-  if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
+  if [[ -n "$WORK_TMPDIR" && -d "$WORK_TMPDIR" ]]; then
+    rm -rf "$WORK_TMPDIR"
   fi
-  TMPDIR=""
+  WORK_TMPDIR=""
 }
 trap cleanup EXIT
 
 setup_repos() {
-  TMPDIR=$(mktemp -d)
+  WORK_TMPDIR=$(mktemp -d "${MKTEMP_PARENT%/}/pre-push.XXXXXX")
   # Create a bare "remote" repo
-  git init --bare "$TMPDIR/remote.git" >/dev/null 2>&1
+  git init --bare "$WORK_TMPDIR/remote.git" >/dev/null 2>&1
   # Clone it as the "local" repo
-  git clone "$TMPDIR/remote.git" "$TMPDIR/local" >/dev/null 2>&1
-  cd "$TMPDIR/local"
+  git clone "$WORK_TMPDIR/remote.git" "$WORK_TMPDIR/local" >/dev/null 2>&1
+  cd "$WORK_TMPDIR/local"
   git config user.email "test@test.com"
   git config user.name "Test"
   # Initial commit
@@ -41,8 +42,8 @@ setup_repos() {
   # Set up origin/HEAD so hook can detect default branch
   git remote set-head origin "$DEFAULT_BRANCH" >/dev/null 2>&1
   # Copy the hook
-  cp "$HOOK" "$TMPDIR/local/.git/hooks/pre-push"
-  chmod +x "$TMPDIR/local/.git/hooks/pre-push"
+  cp "$HOOK" "$WORK_TMPDIR/local/.git/hooks/pre-push"
+  chmod +x "$WORK_TMPDIR/local/.git/hooks/pre-push"
 }
 
 run_hook() {
@@ -85,7 +86,7 @@ echo ""
 # Test 1: Normal push to default branch (no integration content)
 echo "Test 1: Normal push to default branch (no integration content)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 remote_sha=$(get_sha HEAD)
 echo "change1" >> file.txt
 git add file.txt && git commit -m "normal change" >/dev/null 2>&1
@@ -96,7 +97,7 @@ cleanup
 # Test 2: Push to polecat/* branch
 echo "Test 2: Push to polecat/* branch"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 git checkout -b polecat/worker1 >/dev/null 2>&1
 echo "polecat work" >> file.txt
 git add file.txt && git commit -m "polecat work" >/dev/null 2>&1
@@ -107,7 +108,7 @@ cleanup
 # Test 3: Push to integration/* branch
 echo "Test 3: Push to integration/* branch"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 git checkout -b integration/epic-1 >/dev/null 2>&1
 echo "integration work" >> file.txt
 git add file.txt && git commit -m "integration work" >/dev/null 2>&1
@@ -118,7 +119,7 @@ cleanup
 # Test 4: Push to feature/* without upstream remote (blocked)
 echo "Test 4: Push to feature/* without upstream remote"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 git checkout -b feature/thing >/dev/null 2>&1
 echo "feature" >> file.txt
 git add file.txt && git commit -m "feature" >/dev/null 2>&1
@@ -129,8 +130,8 @@ cleanup
 # Test 5: Push to feature/* with upstream remote (allowed)
 echo "Test 5: Push to feature/* with upstream remote"
 setup_repos
-cd "$TMPDIR/local"
-git remote add upstream "$TMPDIR/remote.git" >/dev/null 2>&1
+cd "$WORK_TMPDIR/local"
+git remote add upstream "$WORK_TMPDIR/remote.git" >/dev/null 2>&1
 git checkout -b feature/thing >/dev/null 2>&1
 echo "feature" >> file.txt
 git add file.txt && git commit -m "feature" >/dev/null 2>&1
@@ -141,7 +142,7 @@ cleanup
 # Test 6: Push to default branch with integration merge (no env var) — BLOCKED
 echo "Test 6: Push to default branch with integration merge (no env var)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 # Create and push an integration branch
 git checkout -b integration/epic-2 >/dev/null 2>&1
 echo "epic work" >> file.txt
@@ -161,7 +162,7 @@ cleanup
 # Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1 — ALLOWED
 echo "Test 7: Push to default branch with integration merge + GT_INTEGRATION_LAND=1"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 git checkout -b integration/epic-3 >/dev/null 2>&1
 echo "epic work" >> file.txt
 git add file.txt && git commit -m "epic work" >/dev/null 2>&1
@@ -177,7 +178,7 @@ cleanup
 # Test 8: Push to default branch with non-integration merge — allowed
 echo "Test 8: Push to default branch with non-integration merge"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 # Create a local feature branch and merge it (no need to push to origin)
 git checkout -b feature/normal >/dev/null 2>&1
 echo "feature work" >> file.txt
@@ -192,7 +193,7 @@ cleanup
 # Test 9: Tag push — allowed
 echo "Test 9: Tag push"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 local_sha=$(get_sha HEAD)
 assert_pass "Tag push allowed" run_hook "refs/tags/v1.0.0" "$local_sha" "refs/tags/v1.0.0" "0000000000000000000000000000000000000000"
 cleanup
@@ -200,7 +201,7 @@ cleanup
 # Test 10: Push to default branch with fast-forward integration merge (no merge commit) — BLOCKED
 echo "Test 10: Push to default branch with ff integration merge (no merge commit)"
 setup_repos
-cd "$TMPDIR/local"
+cd "$WORK_TMPDIR/local"
 git checkout -b integration/epic-4 >/dev/null 2>&1
 echo "epic ff work" >> file.txt
 git add file.txt && git commit -m "epic ff work" >/dev/null 2>&1
@@ -212,6 +213,36 @@ git merge --ff-only integration/epic-4 >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
 unset GT_INTEGRATION_LAND 2>/dev/null || true
 assert_block "FF integration merge blocked" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 11: Oversized blob (>100MB) — BLOCKED
+echo "Test 11: Oversized blob blocks push"
+setup_repos
+cd "$WORK_TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+mkdir -p npm-package/bin
+truncate -s 101M npm-package/bin/gt.js
+git add npm-package/bin/gt.js
+git commit -m "add oversized shim" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_block "Oversized blob blocked" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+cleanup
+
+# Test 12: Valid npm shim — ALLOWED
+echo "Test 12: Valid npm shim allowed"
+setup_repos
+cd "$WORK_TMPDIR/local"
+remote_sha=$(get_sha HEAD)
+mkdir -p npm-package/bin
+cat > npm-package/bin/gt.js <<'EOF'
+#!/usr/bin/env node
+console.log("shim");
+EOF
+chmod +x npm-package/bin/gt.js
+git add npm-package/bin/gt.js
+git commit -m "add valid shim" >/dev/null 2>&1
+local_sha=$(get_sha HEAD)
+assert_pass "Valid shim allowed" run_hook "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 echo ""

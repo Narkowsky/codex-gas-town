@@ -21,6 +21,61 @@ if [[ -z "$default_branch" ]]; then
   fi
 fi
 
+# GitHub hard-rejects blobs larger than 100MB.
+MAX_GITHUB_BLOB_SIZE=$((100 * 1024 * 1024))
+# npm wrapper script should remain a tiny Node shim, not a native binary.
+MAX_GT_JS_SHIM_SIZE=$((512 * 1024))
+NULL_SHA="0000000000000000000000000000000000000000"
+
+check_oversized_blobs() {
+  local range=$1
+  local oversized
+  oversized=$(
+    git rev-list --objects "$range" \
+      | git cat-file --batch-check='%(objectname) %(objecttype) %(objectsize) %(rest)' \
+      | awk -v limit="$MAX_GITHUB_BLOB_SIZE" '$2=="blob" && $3>limit {print $4 "\t" $3}'
+  )
+  if [[ -n "$oversized" ]]; then
+    echo "ERROR: Push contains blob(s) larger than 100MB (GitHub hard limit)."
+    echo ""
+    echo "$oversized" | while IFS=$'\t' read -r path size; do
+      [[ -z "$path" ]] && path="<unknown>"
+      echo "  - $path (${size} bytes)"
+    done
+    echo ""
+    echo "Fix: remove or replace oversized files before pushing."
+    return 1
+  fi
+  return 0
+}
+
+validate_gt_js_shim() {
+  local tip_sha=$1
+
+  # If the shim does not exist at tip, nothing to validate.
+  if ! git cat-file -e "${tip_sha}:npm-package/bin/gt.js" 2>/dev/null; then
+    return 0
+  fi
+
+  local size
+  size=$(git cat-file -s "${tip_sha}:npm-package/bin/gt.js" 2>/dev/null || echo 0)
+  if [[ "$size" =~ ^[0-9]+$ ]] && (( size > MAX_GT_JS_SHIM_SIZE )); then
+    echo "ERROR: npm-package/bin/gt.js is unexpectedly large (${size} bytes)."
+    echo "It should be a small Node shim, not a compiled binary."
+    return 1
+  fi
+
+  local first_line
+  first_line=$(git show "${tip_sha}:npm-package/bin/gt.js" 2>/dev/null | head -n 1)
+  if [[ "$first_line" != "#!/usr/bin/env node" ]]; then
+    echo "ERROR: npm-package/bin/gt.js does not look like the expected Node shim."
+    echo "Expected first line: #!/usr/bin/env node"
+    return 1
+  fi
+
+  return 0
+}
+
 # Allowed patterns:
 #   <default_branch>, beads-sync  - Direct work branches
 #   polecat/*                     - Polecat working branches (Refinery merges these)
@@ -58,6 +113,27 @@ while read local_ref local_sha remote_ref remote_sha; do
       fi
       ;;
   esac
+
+  # Skip branch deletions.
+  if [[ "$local_sha" == "$NULL_SHA" ]]; then
+    continue
+  fi
+
+  # Range of commits being introduced by this ref update.
+  range="$local_sha"
+  if [[ "$remote_sha" != "$NULL_SHA" ]]; then
+    range="${remote_sha}..${local_sha}"
+  fi
+
+  # Guard 1: block any blob >100MB before GitHub rejects the push.
+  if ! check_oversized_blobs "$range"; then
+    exit 1
+  fi
+
+  # Guard 2: keep npm wrapper as a text shim (prevent accidental binary copy).
+  if ! validate_gt_js_shim "$local_sha"; then
+    exit 1
+  fi
 
   # Integration branch landing guardrail: when pushing to the default branch,
   # check if any integration branch tip is newly reachable from this push.
